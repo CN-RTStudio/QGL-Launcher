@@ -1084,6 +1084,16 @@ func (a *App) StartServer(name string) error {
 		a.writeLog("security", "在线认证审计阻断启动: "+onlineModeAudit.Describe())
 		return fmt.Errorf("server.properties 在线认证配置未通过安全校验: %s", onlineModeAudit.Describe())
 	}
+	motdControlAudit := AuditServerMotdControl(cfg.ServerDir)
+	if motdControlAudit.Blocking() {
+		a.writeLog("security", "MOTD 控制字符审计阻断启动: "+motdControlAudit.Describe())
+		return fmt.Errorf("MOTD 文本未通过安全校验: %s", motdControlAudit.Describe())
+	}
+	propsStructureAudit := AuditServerPropertiesStructure(cfg.ServerDir)
+	if propsStructureAudit.Blocking() {
+		a.writeLog("security", "属性文件结构审计阻断启动: "+propsStructureAudit.Describe())
+		return fmt.Errorf("server.properties 结构未通过安全校验: %s", propsStructureAudit.Describe())
+	}
 	whitelistCoverageAudit := AuditServerWhitelistCoverage(cfg.ServerDir)
 	if whitelistCoverageAudit.Blocking() {
 		a.writeLog("security", "白名单覆盖审计阻断启动: "+whitelistCoverageAudit.Describe())

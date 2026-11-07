@@ -1109,6 +1109,26 @@ func (a *App) StartServer(name string) error {
 		a.writeLog("security", "作弊开关审计阻断启动: "+exploitTogglesAudit.Describe())
 		return fmt.Errorf("作弊与权限开关配置未通过安全校验: %s", exploitTogglesAudit.Describe())
 	}
+	worldSymlinkAudit := AuditServerWorldSymlinks(cfg.ServerDir)
+	if worldSymlinkAudit.Blocking() {
+		a.writeLog("security", "世界存档符号链接审计阻断启动: "+worldSymlinkAudit.Describe())
+		return fmt.Errorf("世界存档目录未通过安全校验: %s", worldSymlinkAudit.Describe())
+	}
+	opsPrivilegeAudit := AuditServerOpsPrivilege(cfg.ServerDir)
+	if opsPrivilegeAudit.Blocking() {
+		a.writeLog("security", "运维权限审计阻断启动: "+opsPrivilegeAudit.Describe())
+		return fmt.Errorf("运维权限配置未通过安全校验: %s", opsPrivilegeAudit.Describe())
+	}
+	rconHardeningAudit := AuditServerRconHardening(cfg.ServerDir)
+	if rconHardeningAudit.Blocking() {
+		a.writeLog("security", "RCON 加固审计阻断启动: "+rconHardeningAudit.Describe())
+		return fmt.Errorf("RCON 配置未通过安全校验: %s", rconHardeningAudit.Describe())
+	}
+	queryExposureAudit := AuditServerQueryExposure(cfg.ServerDir)
+	if queryExposureAudit.Blocking() {
+		a.writeLog("security", "对外暴露审计阻断启动: "+queryExposureAudit.Describe())
+		return fmt.Errorf("对外暴露配置未通过安全校验: %s", queryExposureAudit.Describe())
+	}
 	pluginConfigAudit := AuditServerPluginConfig(cfg.ServerDir)
 	if pluginConfigAudit.Blocking() {
 		recordSecurityEvent(auditCategoryPermission, auditSeverityCritical, auditActionBlocked,

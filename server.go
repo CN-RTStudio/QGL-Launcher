@@ -1079,6 +1079,36 @@ func (a *App) StartServer(name string) error {
 		a.writeLog("security", "配置一致性审计阻断启动: "+configConsistencyAudit.Describe())
 		return fmt.Errorf("服务器配置组合未通过安全校验: %s", configConsistencyAudit.Describe())
 	}
+	onlineModeAudit := AuditServerOnlineMode(cfg.ServerDir)
+	if onlineModeAudit.Blocking() {
+		a.writeLog("security", "在线认证审计阻断启动: "+onlineModeAudit.Describe())
+		return fmt.Errorf("server.properties 在线认证配置未通过安全校验: %s", onlineModeAudit.Describe())
+	}
+	whitelistCoverageAudit := AuditServerWhitelistCoverage(cfg.ServerDir)
+	if whitelistCoverageAudit.Blocking() {
+		a.writeLog("security", "白名单覆盖审计阻断启动: "+whitelistCoverageAudit.Describe())
+		return fmt.Errorf("白名单覆盖配置未通过安全校验: %s", whitelistCoverageAudit.Describe())
+	}
+	hardcoreAudit := AuditServerHardcore(cfg.ServerDir)
+	if hardcoreAudit.Blocking() {
+		a.writeLog("security", "难度模式审计阻断启动: "+hardcoreAudit.Describe())
+		return fmt.Errorf("难度与游戏模式配置未通过安全校验: %s", hardcoreAudit.Describe())
+	}
+	maxPlayersAudit := AuditServerMaxPlayers(cfg.ServerDir)
+	if maxPlayersAudit.Blocking() {
+		a.writeLog("security", "容量限流审计阻断启动: "+maxPlayersAudit.Describe())
+		return fmt.Errorf("容量与限流配置未通过安全校验: %s", maxPlayersAudit.Describe())
+	}
+	banEnforcementAudit := AuditServerBanEnforcement(cfg.ServerDir)
+	if banEnforcementAudit.Blocking() {
+		a.writeLog("security", "封禁名单审计阻断启动: "+banEnforcementAudit.Describe())
+		return fmt.Errorf("封禁与管理员名单未通过安全校验: %s", banEnforcementAudit.Describe())
+	}
+	exploitTogglesAudit := AuditServerExploitToggles(cfg.ServerDir)
+	if exploitTogglesAudit.Blocking() {
+		a.writeLog("security", "作弊开关审计阻断启动: "+exploitTogglesAudit.Describe())
+		return fmt.Errorf("作弊与权限开关配置未通过安全校验: %s", exploitTogglesAudit.Describe())
+	}
 	pluginConfigAudit := AuditServerPluginConfig(cfg.ServerDir)
 	if pluginConfigAudit.Blocking() {
 		recordSecurityEvent(auditCategoryPermission, auditSeverityCritical, auditActionBlocked,

@@ -1034,6 +1034,51 @@ func (a *App) StartServer(name string) error {
 		a.writeLog("security", "服务器图标审计阻断启动: "+iconFileAudit.Describe())
 		return fmt.Errorf("服务器图标未通过安全校验: %s", iconFileAudit.Describe())
 	}
+	permissionsFileAudit := AuditServerPermissions(cfg.ServerDir)
+	if permissionsFileAudit.Blocking() {
+		a.writeLog("security", "权限配置审计阻断启动: "+permissionsFileAudit.Describe())
+		return fmt.Errorf("服务器权限配置未通过安全校验: %s", permissionsFileAudit.Describe())
+	}
+	bannedPlayersFileAudit := AuditServerBannedPlayers(cfg.ServerDir)
+	if bannedPlayersFileAudit.Blocking() {
+		a.writeLog("security", "封禁名单审计阻断启动: "+bannedPlayersFileAudit.Describe())
+		return fmt.Errorf("服务器封禁名单未通过安全校验: %s", bannedPlayersFileAudit.Describe())
+	}
+	paperWorldAudit := AuditServerPaperWorldDefaults(cfg.ServerDir)
+	if paperWorldAudit.Blocking() {
+		a.writeLog("security", "Paper 世界默认配置审计阻断启动: "+paperWorldAudit.Describe())
+		return fmt.Errorf("服务器 Paper 世界默认配置未通过安全校验: %s", paperWorldAudit.Describe())
+	}
+	purpurConfigAudit := AuditServerPurpurConfig(cfg.ServerDir)
+	if purpurConfigAudit.Blocking() {
+		a.writeLog("security", "Purpur 配置审计阻断启动: "+purpurConfigAudit.Describe())
+		return fmt.Errorf("服务器 Purpur 配置未通过安全校验: %s", purpurConfigAudit.Describe())
+	}
+	levelDataAudit := AuditServerLevelData(cfg.ServerDir)
+	if levelDataAudit.Blocking() {
+		a.writeLog("security", "存档元数据审计阻断启动: "+levelDataAudit.Describe())
+		return fmt.Errorf("服务器存档元数据未通过安全校验: %s", levelDataAudit.Describe())
+	}
+	propertiesEncodingAudit := AuditServerPropertiesEncoding(cfg.ServerDir)
+	if propertiesEncodingAudit.Blocking() {
+		a.writeLog("security", "属性文件编码审计阻断启动: "+propertiesEncodingAudit.Describe())
+		return fmt.Errorf("服务器属性文件编码未通过安全校验: %s", propertiesEncodingAudit.Describe())
+	}
+	jvmArgsFileAudit := AuditServerJvmArgsFile(cfg.ServerDir)
+	if jvmArgsFileAudit.Blocking() {
+		a.writeLog("security", "JVM 参数审计阻断启动: "+jvmArgsFileAudit.Describe())
+		return fmt.Errorf("服务器 JVM 参数未通过安全校验: %s", jvmArgsFileAudit.Describe())
+	}
+	crashReportsAudit := AuditServerCrashReports(cfg.ServerDir)
+	if crashReportsAudit.Blocking() {
+		a.writeLog("security", "崩溃报告审计阻断启动: "+crashReportsAudit.Describe())
+		return fmt.Errorf("服务器崩溃报告未通过安全校验: %s", crashReportsAudit.Describe())
+	}
+	configConsistencyAudit := AuditServerConfigConsistency(cfg.ServerDir)
+	if configConsistencyAudit.Blocking() {
+		a.writeLog("security", "配置一致性审计阻断启动: "+configConsistencyAudit.Describe())
+		return fmt.Errorf("服务器配置组合未通过安全校验: %s", configConsistencyAudit.Describe())
+	}
 	pluginConfigAudit := AuditServerPluginConfig(cfg.ServerDir)
 	if pluginConfigAudit.Blocking() {
 		recordSecurityEvent(auditCategoryPermission, auditSeverityCritical, auditActionBlocked,

@@ -168,7 +168,7 @@ func TestPropertiesQuotedValue(t *testing.T) {
 	}
 }
 
-func TestPropertiesBOM(t *testing.T) {
+func TestPropertiesAuditBOM(t *testing.T) {
 	dir := t.TempDir()
 	prpWrite(t, dir, "\ufeff"+prpHardened)
 	a := AuditServerProperties(dir)

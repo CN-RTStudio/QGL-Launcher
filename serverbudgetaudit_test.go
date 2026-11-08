@@ -147,7 +147,7 @@ func TestAuditServerBudgetDatapacks(t *testing.T) {
 	}
 }
 
-func TestbdHuman(t *testing.T) {
+func TestBdHuman(t *testing.T) {
 	cases := map[int64]string{
 		512:     "512B",
 		1024:    "1.0KB",
@@ -162,7 +162,7 @@ func TestbdHuman(t *testing.T) {
 	}
 }
 
-func TestbdCountDirEntriesFilter(t *testing.T) {
+func TestBdCountDirEntriesFilter(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "a.jar"), []byte("x"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)

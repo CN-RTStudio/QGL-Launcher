@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -53,26 +52,11 @@ func (a JarClassPathAudit) Blocking() bool {
 }
 
 func (a JarClassPathAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != jarCpReasonOK {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f JarCPFinding) bool { return !f.Blocking && f.Reason != jarCpReasonOK })
 }
 
 func (a JarClassPathAudit) Codes() []string {
-	seen := map[string]bool{}
-	codes := []string{}
-	for _, f := range a.Findings {
-		if f.Reason == jarCpReasonOK || seen[f.Reason] {
-			continue
-		}
-		seen[f.Reason] = true
-		codes = append(codes, f.Reason)
-	}
-	sort.Strings(codes)
-	return codes
+	return findingCodesSkip(a.Findings, jarCpReasonOK, func(f JarCPFinding) string { return f.Reason })
 }
 
 func (a JarClassPathAudit) Describe() string {

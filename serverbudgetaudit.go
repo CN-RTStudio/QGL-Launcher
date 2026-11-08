@@ -51,12 +51,7 @@ func (a BudgetAudit) Blocking() bool {
 }
 
 func (a BudgetAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != bdReasonOK {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f BudgetFinding) bool { return !f.Blocking && f.Reason != bdReasonOK })
 }
 
 func (a BudgetAudit) Describe() string {

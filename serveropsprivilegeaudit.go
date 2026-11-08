@@ -57,16 +57,11 @@ func (a *OpsPrivilegeAudit) add(reason, detail string, blocking bool) {
 }
 
 func (a *OpsPrivilegeAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f OpsPrivilegeFinding) bool { return f.Blocking })
 }
 
 func (a *OpsPrivilegeAudit) HasWarnings() bool {
-	return len(a.Findings) > 0
+	return hasAny(a.Findings)
 }
 
 func (a *OpsPrivilegeAudit) Describe() string {

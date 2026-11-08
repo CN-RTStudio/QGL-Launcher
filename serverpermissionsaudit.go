@@ -47,16 +47,11 @@ func (a *PermissionsAudit) add(file, reason, detail string, blocking bool) {
 }
 
 func (a *PermissionsAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f PermissionsFinding) bool { return f.Blocking })
 }
 
 func (a *PermissionsAudit) HasWarnings() bool {
-	return len(a.Findings) > 0
+	return hasAny(a.Findings)
 }
 
 func (a *PermissionsAudit) Describe() string {

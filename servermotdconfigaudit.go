@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 )
 
@@ -62,34 +61,16 @@ func (a *MotdConfigAudit) HasWarnings() bool {
 }
 
 func (a *MotdConfigAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return "MOTD 与状态响应未泄露敏感信息"
-	}
-	sorted := make([]MotdConfigFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Reason != sorted[j].Reason {
-			return sorted[i].Reason < sorted[j].Reason
-		}
-		return sorted[i].Detail < sorted[j].Detail
-	})
-	var b strings.Builder
-	for i, f := range sorted {
-		if i >= 10 {
-			b.WriteString(fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		if i > 0 {
-			b.WriteString("；")
-		}
-		b.WriteString(f.Reason)
-		if f.Detail != "" {
-			b.WriteString("(")
-			b.WriteString(f.Detail)
-			b.WriteString(")")
-		}
-	}
-	return b.String()
+	return describeAuditFindings("MOTD 与状态响应未泄露敏感信息", a.Findings, 10,
+		func(f MotdConfigFinding) []string {
+			return []string{f.Reason, f.Detail}
+		},
+		func(f MotdConfigFinding) string {
+			if f.Detail == "" {
+				return f.Reason
+			}
+			return f.Reason + "(" + f.Detail + ")"
+		})
 }
 
 func motReadProps(serverDir string, a *MotdConfigAudit) (map[string]string, bool) {

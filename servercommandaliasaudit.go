@@ -123,35 +123,17 @@ func (a *CommandAliasAudit) add(file, alias, reason, detail string, blocking boo
 }
 
 func caCheckFile(audit *CommandAliasAudit, rel string) bool {
-	path := filepath.Join(audit.Dir, filepath.FromSlash(rel))
-	info, err := os.Lstat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			audit.add(rel, "", caReasonMissing, "配置文件不存在", false)
-		} else {
-			audit.add(rel, "", caReasonUnreadable, err.Error(), false)
-		}
-		return false
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		audit.add(rel, "", caReasonSymlink, "配置文件是符号链接", true)
-		return false
-	}
-	if !info.Mode().IsRegular() {
-		audit.add(rel, "", caReasonUnreadable, "配置文件不是普通文件", true)
-		return false
-	}
-	if info.Size() > caMaxFileBytes {
-		audit.add(rel, "", caReasonTooLarge, fmt.Sprintf("配置体积 %d 字节", info.Size()), true)
-		return false
-	}
-	if info.Mode().Perm()&0o022 != 0 {
-		audit.add(rel, "", caReasonWorldWritable, fmt.Sprintf("权限 %#o 允许他人写入", info.Mode().Perm()), true)
-	}
-	if info.Mode().Perm()&0o004 != 0 {
-		audit.add(rel, "", caReasonWorldReadable, fmt.Sprintf("权限 %#o 允许他人读取", info.Mode().Perm()), false)
-	}
-	return true
+	return checkServerCfgFile(audit.Dir, rel, caMaxFileBytes,
+		cfgFileReasons{
+			Missing:       caReasonMissing,
+			Unreadable:    caReasonUnreadable,
+			Symlink:       caReasonSymlink,
+			TooLarge:      caReasonTooLarge,
+			WorldWritable: caReasonWorldWritable,
+			WorldReadable: caReasonWorldReadable,
+		},
+		cfgFileLabels{Noun: "配置文件", SizeLabel: "配置体积"},
+		func(reason, detail string, blocking bool) { audit.add(rel, "", reason, detail, blocking) })
 }
 
 func caStripComment(line string) string {

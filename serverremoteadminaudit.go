@@ -145,7 +145,7 @@ func AuditServerRemoteAdmin(serverDir string) (*ServerRemoteAudit, error) {
 		})
 		return audit, nil
 	}
-	data, err := os.ReadFile(audit.Path)
+	data, err := readBoundedFile(audit.Path, auditTextReadMaxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("读取服务器配置失败: %w", err)
 	}

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -47,12 +46,7 @@ func (a *Log4jShellAudit) add(file, reason, detail string, blocking bool) {
 }
 
 func (a *Log4jShellAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f Log4jFinding) bool { return f.Blocking })
 }
 
 func (a *Log4jShellAudit) HasWarnings() bool {
@@ -65,15 +59,7 @@ func (a *Log4jShellAudit) HasWarnings() bool {
 }
 
 func (a *Log4jShellAudit) Describe() string {
-	items := make([]string, 0, len(a.Findings))
-	for _, f := range a.Findings {
-		items = append(items, fmt.Sprintf("%s:%s:%s", f.File, f.Reason, f.Detail))
-	}
-	sort.Strings(items)
-	if len(items) > 12 {
-		items = append(items[:12], fmt.Sprintf("...共%d项", len(a.Findings)))
-	}
-	return strings.Join(items, "; ")
+	return describeFindings(a.Findings, func(f Log4jFinding) string { return fmt.Sprintf("%s:%s:%s", f.File, f.Reason, f.Detail) }, 12)
 }
 
 func ljStripJarName(name string) (string, string) {

@@ -78,12 +78,7 @@ func (a HelpOverrideAudit) Blocking() bool {
 }
 
 func (a HelpOverrideAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != hoReasonOK {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f HelpOverrideFinding) bool { return !f.Blocking && f.Reason != hoReasonOK })
 }
 
 func (a HelpOverrideAudit) Describe() string {

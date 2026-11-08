@@ -60,12 +60,7 @@ func (a PermissionConfigAudit) Blocking() bool {
 }
 
 func (a PermissionConfigAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != pmReasonOK {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f PermissionConfigFinding) bool { return !f.Blocking && f.Reason != pmReasonOK })
 }
 
 func (a PermissionConfigAudit) Describe() string {

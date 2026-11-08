@@ -158,6 +158,9 @@ func ParseServerAddress(raw string, lim ServerListLimits) (ServerEntry, error) {
 // 避免私网服务器被这些写法标成普通公网 IP（历史上本文件的 isLoopbackHost /
 // isPrivateIPv4 只认严格四段、且 IPv6 用 "fc"/"fd" 字符串前缀粗判，口径偏松且重复）。
 func classifyServerHost(host string) ServerKind {
+	if isLoopbackHostName(host) {
+		return ServerKindLoopback
+	}
 	if ip, ok := parseDestIP(host); ok {
 		if ip.IsLoopback() {
 			return ServerKindLoopback

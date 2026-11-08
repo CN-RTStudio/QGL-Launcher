@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,82 +19,176 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
+// ===== 安全工具函数 =====
+
+// isHTTPSURL 验证 URL 是否为 HTTPS 协议
+// 防止 HTTP 中间人攻击，所有下载 URL 必须使用 HTTPS
+func isHTTPSURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	return u.Scheme == "https"
+}
+
+// allowedMavenLibHosts 是允许下载游戏依赖库的 Maven 主机白名单。
+// install_profile.json / version.json 来自镜像上不受信任的安装器，其中每个库
+// 的 url/sha1 都由安装器作者填写：攻击者可以把某个库的 url 指向自己的服务器，
+// 该 jar 最终会落进 libraries 并进入 JVM classpath，等同于远程代码执行。
+// 光有 https 和“随安装器自带的 sha1”挡不住这一点（主机和 sha1 都是攻击者写的），
+// 所以必须把下载主机限定在官方/可信 Maven 源，再尽量用官方 sha1 复核传输完整性。
+var allowedMavenLibHosts = map[string]bool{
+	"maven.minecraftforge.net": true,
+	"maven.neoforged.net":      true,
+	"libraries.minecraft.net":  true,
+	"piston-data.mojang.com":   true,
+	"maven.fabricmc.net":       true,
+	"repo1.maven.org":          true, // Maven Central，部分安装器依赖在此
+	"bmclapi2.bangbang93.com":  true, // BMCLAPI 镜像（重写后的目标主机）
+}
+
+// isAllowedMavenLibURL 判断依赖库下载 URL 是否落在可信 Maven 主机上。
+// 强制 https、不允许 userinfo、只允许默认 443、主机必须精确命中白名单
+// （用 map 精确匹配而非后缀匹配，避免 evil-maven.minecraftforge.net.evil.com
+// 之类的伪造主机绕过）。
+func isAllowedMavenLibURL(rawURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "https" || u.User != nil {
+		return false
+	}
+	if port := u.Port(); port != "" && port != "443" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	host = strings.TrimSuffix(host, ".") // 容忍结尾点，但仍须精确命中
+	return allowedMavenLibHosts[host]
+}
+
+// readLimited 读取响应体，限制最大大小防止内存耗尽攻击
+// 用于 API JSON 响应，最大 10MB
+func readLimited(r io.Reader, maxSize int64) ([]byte, error) {
+	return io.ReadAll(io.LimitReader(r, maxSize))
+}
+
+// apiJSONMaxBytes 限制所有元数据 API 返回的 JSON 响应大小。
+// 版本清单 / Loader 列表等接口本应返回几 KB ~ 几百 KB，
+// 超过 10 MiB 基本就是恶意响应或错误页面，直接拒绝。
+const apiJSONMaxBytes = 10 << 20
+
+// readAPIJSON 读 resp.Body 并在 10 MiB 上限内 Unmarshal。
+func readAPIJSON(resp *http.Response, v interface{}) error {
+	body, err := readLimited(resp.Body, apiJSONMaxBytes)
+	if err != nil {
+		return err
+	}
+	if int64(len(body)) >= apiJSONMaxBytes {
+		return fmt.Errorf("API 响应超过 %d 字节上限", apiJSONMaxBytes)
+	}
+	return json.Unmarshal(body, v)
+}
+
+// 安装器（Forge/NeoForge JAR）来自镜像、不受信任。其中的 install_profile.json /
+// version.json 正常只有几百 KB，内嵌的库 jar 正常几十 MB。给条目读取设上限，
+// 防止恶意安装器用高压缩比超大条目把进程内存撑爆（解压炸弹）。
+const (
+	maxInstallerJSONBytes int64 = 16 << 20  // 安装器内 JSON 元数据 16 MiB
+	maxInstallerLibBytes  int64 = 256 << 20 // 安装器内内嵌库 jar 256 MiB
+)
+
+// readZipEntryLimited 读取单个 zip 条目并限制解压后体积：
+// 先用 zip 元数据预检，再用 LimitReader 多读 1 字节判定实际超限，
+// 调用方无需信任 f.UncompressedSize64 与真实流是否一致。
+func readZipEntryLimited(f *zip.File, maxBytes int64) ([]byte, error) {
+	if f.UncompressedSize64 > uint64(maxBytes) {
+		return nil, fmt.Errorf("zip 条目解压后声明体积超过 %d 字节: %s", maxBytes, f.Name)
+	}
+	rc, err := f.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	data, err := io.ReadAll(io.LimitReader(rc, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("zip 条目解压后体积超过 %d 字节: %s", maxBytes, f.Name)
+	}
+	return data, nil
+}
+
+// isSafeFileName 验证版本名/文件名只包含安全字符
+// 防止路径遍历攻击（../, /, \ 等），只允许字母、数字、点、下划线、短横线
+func isSafeFileName(name string) bool {
+	if len(name) == 0 || len(name) > 100 {
+		return false
+	}
+	for _, r := range name {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			r == '.' || r == '-' || r == '_') {
+			return false
+		}
+	}
+	// ASCII 白名单已经挡掉分隔符与冒号，但 CON / NUL / COM1 这类纯字母数字的
+	// Windows 保留设备名仍能通过，统一复用 nameguard 的保留名判定再挡一道。
+	if isReservedDeviceName(stemOfName(name)) {
+		return false
+	}
+	return true
+}
+
+// isSafeRelPath 验证相对路径不包含路径遍历组件（Zip Slip 防护）
+// 返回清洗后的安全路径，如果不安全返回空字符串
+func isSafeRelPath(relPath string) string {
+	if relPath == "" {
+		return ""
+	}
+	cleaned := filepath.Clean(relPath)
+	// 拒绝绝对路径
+	if filepath.IsAbs(cleaned) {
+		return ""
+	}
+	// 拒绝以 .. 开头的逃逸路径
+	if strings.HasPrefix(cleaned, "..") {
+		return ""
+	}
+	// 拒绝包含 .. 段的路径
+	parts := strings.Split(cleaned, string(os.PathSeparator))
+	for _, p := range parts {
+		if p == ".." {
+			return ""
+		}
+	}
+	return cleaned
+}
+
 // ===== 日志功能 =====
 
 // writeLog 将信息写入日志文件（用户可随时查看和复制）
 func (a *App) writeLog(format string, args ...interface{}) {
-	msg := fmt.Sprintf(format, args...)
+	// 在写控制台 / qgl_install.log / 启动日志之前统一脱敏：启动参数与游戏输出里
+	// 可能带微软 access token、Bearer、JWT、密码等，任何一处落盘/外发都算泄密。
+	msg := sanitizeLogLine(fmt.Sprintf(format, args...))
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
 	logLine := fmt.Sprintf("[%s] %s\n", timestamp, msg)
 
-	// 打印到控制台
 	fmt.Print(logLine)
 
-	// 写入安装日志（.minecraft 根目录）
 	mcDir := a.GetMinecraftDir()
 	logPath := filepath.Join(mcDir, "qgl_install.log")
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err == nil {
-		f.WriteString(logLine)
-		f.Close()
-	}
+	// 有界日志：4MiB 软上限 + 单份 .1 轮转 + 拒符号链接，防止崩溃循环刷屏占满磁盘。
+	_ = getBoundedLogger(logPath).appendBounded(logLine)
 
-	// 写入启动日志（版本目录下的 QGL\Logs，与 UI 报错内容一致）
 	if a.launchLogPath != "" {
 		dir := filepath.Dir(a.launchLogPath)
-		os.MkdirAll(dir, 0755)
-		f2, err2 := os.OpenFile(a.launchLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-		if err2 == nil {
-			f2.WriteString(logLine)
-			f2.Close()
+		// 日志目录同样收权到 0700（已存在的宽权限目录一并收敛），失败则放弃本次日志落盘。
+		if ensurePrivateDir(dir) == nil {
+			_ = getBoundedLogger(a.launchLogPath).appendBounded(logLine)
 		}
 	}
-}
-
-// GetFullLog 获取完整日志文本（优先本次启动日志，其次安装日志）
-func (a *App) GetFullLog() string {
-	if a.launchLogPath != "" {
-		if data, err := os.ReadFile(a.launchLogPath); err == nil && len(data) > 0 {
-			return string(data)
-		}
-	}
-	mcDir := a.GetMinecraftDir()
-	if data, err := os.ReadFile(filepath.Join(mcDir, "qgl_install.log")); err == nil {
-		return string(data)
-	}
-	return "暂无日志"
-}
-
-// ExportLogTxt 弹出保存对话框，将完整日志导出为 txt，返回保存路径（取消返回空）
-func (a *App) ExportLogTxt() string {
-	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
-		Title:           "导出日志",
-		DefaultFilename: "QGL日志.txt",
-		Filters: []runtime.FileFilter{
-			{DisplayName: "文本文件 (*.txt)", Pattern: "*.txt"},
-		},
-	})
-	if err != nil || path == "" {
-		return ""
-	}
-	if err := os.WriteFile(path, []byte(a.GetFullLog()), 0644); err != nil {
-		return ""
-	}
-	return path
-}
-
-// ViewFullLog 用记事本打开完整日志
-func (a *App) ViewFullLog() {
-	path := a.launchLogPath
-	if path == "" {
-		path = filepath.Join(a.GetMinecraftDir(), "qgl_install.log")
-	}
-	// 文件不存在时先写出当前日志内容，保证记事本能打开
-	if _, err := os.Stat(path); err != nil {
-		os.MkdirAll(filepath.Dir(path), 0755)
-		os.WriteFile(path, []byte(a.GetFullLog()), 0644)
-	}
-	exec.Command("notepad.exe", path).Start()
 }
 
 // ===== 嵌入 bangbang93 ForgeInstaller =====
@@ -103,7 +198,6 @@ var forgeInstallerJar []byte
 
 // ===== 模组加载器相关结构体 =====
 
-// LoaderInfo 模组加载器信息
 type LoaderInfo struct {
 	Name         string `json:"name"`
 	DisplayName  string `json:"displayName"`
@@ -112,14 +206,13 @@ type LoaderInfo struct {
 	DownloadURL  string `json:"downloadUrl"`
 	IsInstalled  bool   `json:"isInstalled"`
 	Stable       bool   `json:"stable"`
-	Category     string `json:"category"`     // installer, universal, client (Forge)
-	ForgeVersion string `json:"forgeVersion"` // Forge 完整版本名如 1.20.1-47.3.0
-	IsPreview    bool   `json:"isPreview"`    // OptiFine 是否为预览版
-	Patch        string `json:"patch"`        // OptiFine patch 版本号
-	OptiFineType string `json:"optifineType"` // OptiFine 类型如 HD_U
+	Category     string `json:"category"`
+	ForgeVersion string `json:"forgeVersion"`
+	IsPreview    bool   `json:"isPreview"`
+	Patch        string `json:"patch"`
+	OptiFineType string `json:"optifineType"`
 }
 
-// BMCLAPI Forge 版本条目
 type BMCLAPIForgeEntry struct {
 	Branch   string `json:"branch"`
 	Modified string `json:"modified"`
@@ -133,7 +226,6 @@ type BMCLAPIForgeEntry struct {
 	} `json:"files"`
 }
 
-// BMCLAPI OptiFine 版本条目
 type BMCLAPIOptiFineEntry struct {
 	MCVersion string `json:"mcversion"`
 	Type      string `json:"type"`
@@ -142,7 +234,6 @@ type BMCLAPIOptiFineEntry struct {
 	Forge     string `json:"forge"`
 }
 
-// Fabric 加载器版本
 type FabricLoaderVersion struct {
 	Separator string `json:"separator"`
 	Build     int    `json:"build"`
@@ -151,13 +242,17 @@ type FabricLoaderVersion struct {
 	Stable    bool   `json:"stable"`
 }
 
-// ===== Forge 版本获取（使用 BMCLAPI） =====
+// ===== Forge 版本获取 =====
 
-// GetForgeVersions 获取 Forge 版本列表
 func (a *App) GetForgeVersions(mcVersion string) ([]LoaderInfo, error) {
+	if !isValidMCVersion(mcVersion) {
+		return nil, fmt.Errorf("无效的 Minecraft 版本格式")
+	}
+
 	apiURL := fmt.Sprintf("https://bmclapi2.bangbang93.com/forge/minecraft/%s", mcVersion)
 
-	resp, err := http.Get(apiURL)
+	client := safeHTTPClient()
+	resp, err := client.Get(apiURL)
 	if err != nil {
 		return nil, fmt.Errorf("获取 Forge 版本失败: %v", err)
 	}
@@ -168,16 +263,14 @@ func (a *App) GetForgeVersions(mcVersion string) ([]LoaderInfo, error) {
 	}
 
 	var entries []BMCLAPIForgeEntry
-	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+	if err := readAPIJSON(resp, &entries); err != nil {
 		return nil, fmt.Errorf("解析 Forge 版本失败: %v", err)
 	}
 
-	// 获取推荐版本
 	recommendedVersion := ""
-	promosResp, err := http.Get("https://bmclapi2.bangbang93.com/forge/promos")
-	if err == nil && promosResp.StatusCode == http.StatusOK {
+	if promosResp, promosErr := safeHTTPClient().Get("https://bmclapi2.bangbang93.com/forge/promos"); promosErr == nil && promosResp.StatusCode == http.StatusOK {
 		var promos map[string]string
-		if json.NewDecoder(promosResp.Body).Decode(&promos) == nil {
+		if promosErr2 := readAPIJSON(promosResp, &promos); promosErr2 == nil {
 			recommendedVersion = promos[mcVersion+"-recommended"]
 		}
 		promosResp.Body.Close()
@@ -185,7 +278,6 @@ func (a *App) GetForgeVersions(mcVersion string) ([]LoaderInfo, error) {
 
 	loaders := []LoaderInfo{}
 	for _, entry := range entries {
-		// 选择最佳文件类型：installer.jar > universal.zip
 		var bestFile *struct {
 			Category string `json:"category"`
 			Format   string `json:"format"`
@@ -219,7 +311,6 @@ func (a *App) GetForgeVersions(mcVersion string) ([]LoaderInfo, error) {
 			category = bestFile.Category
 		}
 
-		// 构建下载 URL
 		ext := "jar"
 		if category == "universal" || category == "client" {
 			ext = "zip"
@@ -246,21 +337,36 @@ func (a *App) GetForgeVersions(mcVersion string) ([]LoaderInfo, error) {
 	return loaders, nil
 }
 
+// isValidMCVersion 验证 Minecraft 版本号格式
+// 防止版本号注入攻击，只允许数字、点、下划线和字母
+func isValidMCVersion(version string) bool {
+	if len(version) > 20 {
+		return false
+	}
+	for _, r := range version {
+		if !((r >= '0' && r <= '9') || r == '.' || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
 // ===== Fabric 版本获取 =====
 
-// GetFabricVersions 获取 Fabric 版本列表
 func (a *App) GetFabricVersions(mcVersion string) ([]LoaderInfo, error) {
-	// 参考 PCL：先获取完整版本列表，检查 MC 版本是否在 game 数组中
-	// 优先使用 BMCLAPI 镜像，失败回退官方源
+	if !isValidMCVersion(mcVersion) {
+		return nil, fmt.Errorf("无效的 Minecraft 版本格式")
+	}
+
+	client := safeHTTPClient()
 	fabricMetaURL := "https://bmclapi2.bangbang93.com/fabric-meta/v2/versions"
 
-	resp, err := http.Get(fabricMetaURL)
+	resp, err := client.Get(fabricMetaURL)
 	if err != nil || resp.StatusCode != http.StatusOK {
 		if resp != nil {
 			resp.Body.Close()
 		}
-		// 回退到官方源
-		resp, err = http.Get("https://meta.fabricmc.net/v2/versions")
+		resp, err = safeHTTPClient().Get("https://meta.fabricmc.net/v2/versions")
 		if err != nil {
 			return nil, fmt.Errorf("获取 Fabric 版本失败: %v", err)
 		}
@@ -272,21 +378,17 @@ func (a *App) GetFabricVersions(mcVersion string) ([]LoaderInfo, error) {
 	}
 
 	var fabricMeta struct {
-		Game     []struct {
+		Game []struct {
 			Version string `json:"version"`
-			Stable bool   `json:"stable"`
+			Stable  bool   `json:"stable"`
 		} `json:"game"`
 		Loader []FabricLoaderVersion `json:"loader"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&fabricMeta); err != nil {
+	if err := readAPIJSON(resp, &fabricMeta); err != nil {
 		return nil, fmt.Errorf("解析 Fabric 版本失败: %v", err)
 	}
 
-	// 检查 MC 版本是否在 game 数组中（参考 PCL LoadFabricGetError）
 	mcVersionNormalized := mcVersion
-	if mcVersionNormalized == "infinite" {
-		mcVersionNormalized = "infinite"
-	}
 	supported := false
 	for _, g := range fabricMeta.Game {
 		if g.Version == mcVersionNormalized {
@@ -294,7 +396,6 @@ func (a *App) GetFabricVersions(mcVersion string) ([]LoaderInfo, error) {
 			break
 		}
 	}
-	// 如果不支持，返回空列表（参考 PCL 显示"不可用"）
 	if !supported {
 		return []LoaderInfo{}, nil
 	}
@@ -316,33 +417,29 @@ func (a *App) GetFabricVersions(mcVersion string) ([]LoaderInfo, error) {
 
 // ===== NeoForge 版本获取 =====
 
-// GetNeoForgeVersions 获取 NeoForge 版本列表（参考 PCL DlNeoForgeList）
 func (a *App) GetNeoForgeVersions(mcVersion string) ([]LoaderInfo, error) {
-	// NeoForge 仅支持 1.20.1+
+	if !isValidMCVersion(mcVersion) {
+		return nil, fmt.Errorf("无效的 Minecraft 版本格式")
+	}
+
 	major, minor, patch := parseMCVersion(mcVersion)
 	mcNum := major*1000 + minor*100 + patch
 	if mcNum < 1201 {
 		return []LoaderInfo{}, nil
 	}
 
-	// 参考 PCL：同时获取 Legacy 和 Latest 列表
-	// Legacy: 1.20.1 (net/neoforged/forge)
-	// Latest: 1.20.2+ (net/neoforged/neoforge)
 	var allVersions []string
 
-	// 获取 Legacy 列表
 	legacyURL := "https://bmclapi2.bangbang93.com/neoforge/meta/api/maven/details/releases/net/neoforged/forge"
 	if entries, err := fetchNeoForgeVersionList(legacyURL); err == nil {
 		allVersions = append(allVersions, entries...)
 	}
 
-	// 获取 Latest 列表
 	latestURL := "https://bmclapi2.bangbang93.com/neoforge/meta/api/maven/details/releases/net/neoforged/neoforge"
 	if entries, err := fetchNeoForgeVersionList(latestURL); err == nil {
 		allVersions = append(allVersions, entries...)
 	}
 
-	// 如果 BMCLAPI 都失败，尝试官方源
 	if len(allVersions) == 0 {
 		legacyOfficialURL := "https://maven.neoforged.net/api/maven/versions/releases/net/neoforged/forge"
 		if entries, err := fetchNeoForgeVersionList(legacyOfficialURL); err == nil {
@@ -356,25 +453,20 @@ func (a *App) GetNeoForgeVersions(mcVersion string) ([]LoaderInfo, error) {
 
 	loaders := []LoaderInfo{}
 	for _, apiName := range allVersions {
-		// 参考 PCL DlNeoForgeListEntry.New：根据版本名确定 MC 版本
 		isLegacy := strings.Contains(apiName, "1.20.1")
 		inheritVersion := ""
 
 		if isLegacy {
-			// Legacy: 1.20.1-47.1.99
 			inheritVersion = "1.20.1"
 		} else {
-			// Latest: 20.4.30-beta → MC 1.20.4
-			// 参考 PCL：Version = ApiName.BeforeFirst("-")，Inherit = 1.{Major}.{Minor}
 			versionPart := apiName
 			if idx := strings.Index(apiName, "-"); idx > 0 {
 				versionPart = apiName[:idx]
 			}
 			parts := strings.Split(versionPart, ".")
 			if len(parts) >= 2 {
-				nfMajor := parts[0] // e.g., "20"
-				nfMinor := parts[1]  // e.g., "4"
-				// MC 版本 = 1.{nfMajor}.{nfMinor}，如果 nfMinor 为 0 则为 1.{nfMajor}
+				nfMajor := parts[0]
+				nfMinor := parts[1]
 				if nfMinor == "0" {
 					inheritVersion = "1." + nfMajor
 				} else {
@@ -383,14 +475,12 @@ func (a *App) GetNeoForgeVersions(mcVersion string) ([]LoaderInfo, error) {
 			}
 		}
 
-		// 只保留匹配当前 MC 版本的版本
 		if inheritVersion != mcVersion {
 			continue
 		}
 
 		isBeta := strings.Contains(apiName, "beta")
 
-		// 跳过已知不可用版本（参考 PCL：47.1.82）
 		if apiName == "1.20.1-47.1.82" {
 			continue
 		}
@@ -400,13 +490,11 @@ func (a *App) GetNeoForgeVersions(mcVersion string) ([]LoaderInfo, error) {
 			pkgName = "forge"
 		}
 
-		// BMCLAPI 镜像下载链接
 		downloadURL := fmt.Sprintf(
 			"https://bmclapi2.bangbang93.com/maven/net/neoforged/%s/%s/%s-%s-installer.jar",
 			pkgName, apiName, pkgName, apiName,
 		)
 
-		// 提取显示版本号
 		displayVersion := apiName
 		if isLegacy {
 			displayVersion = strings.TrimPrefix(apiName, "1.20.1-")
@@ -423,7 +511,6 @@ func (a *App) GetNeoForgeVersions(mcVersion string) ([]LoaderInfo, error) {
 		})
 	}
 
-	// 只保留最近 10 个版本
 	if len(loaders) > 10 {
 		loaders = loaders[len(loaders)-10:]
 	}
@@ -431,9 +518,13 @@ func (a *App) GetNeoForgeVersions(mcVersion string) ([]LoaderInfo, error) {
 	return loaders, nil
 }
 
-// fetchNeoForgeVersionList 从 API 获取版本列表（仅返回版本名数组）
 func fetchNeoForgeVersionList(apiURL string) ([]string, error) {
-	resp, err := http.Get(apiURL)
+	if !isHTTPSURL(apiURL) {
+		return nil, fmt.Errorf("不安全的 URL 协议")
+	}
+
+	client := safeHTTPClient()
+	resp, err := client.Get(apiURL)
 	if err != nil {
 		return nil, err
 	}
@@ -443,12 +534,11 @@ func fetchNeoForgeVersionList(apiURL string) ([]string, error) {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := readLimited(resp.Body, apiJSONMaxBytes)
 	if err != nil {
 		return nil, err
 	}
 
-	// 尝试解析为 {"versions": [...]} 格式
 	var data struct {
 		Versions []string `json:"versions"`
 	}
@@ -456,7 +546,6 @@ func fetchNeoForgeVersionList(apiURL string) ([]string, error) {
 		return data.Versions, nil
 	}
 
-	// 尝试解析为 Maven 标准格式 {"version": [...]}
 	var mavenData struct {
 		Versions struct {
 			Version []string `json:"version"`
@@ -471,11 +560,15 @@ func fetchNeoForgeVersionList(apiURL string) ([]string, error) {
 
 // ===== OptiFine 版本获取 =====
 
-// GetOptiFineVersions 获取 OptiFine 版本列表
 func (a *App) GetOptiFineVersions(mcVersion string) ([]LoaderInfo, error) {
+	if !isValidMCVersion(mcVersion) {
+		return nil, fmt.Errorf("无效的 Minecraft 版本格式")
+	}
+
+	client := safeHTTPClient()
 	apiURL := "https://bmclapi2.bangbang93.com/optifine/versionList"
 
-	resp, err := http.Get(apiURL)
+	resp, err := client.Get(apiURL)
 	if err != nil {
 		return nil, fmt.Errorf("获取 OptiFine 版本失败: %v", err)
 	}
@@ -486,7 +579,7 @@ func (a *App) GetOptiFineVersions(mcVersion string) ([]LoaderInfo, error) {
 	}
 
 	var allEntries []BMCLAPIOptiFineEntry
-	if err := json.NewDecoder(resp.Body).Decode(&allEntries); err != nil {
+	if err := readAPIJSON(resp, &allEntries); err != nil {
 		return nil, fmt.Errorf("解析 OptiFine 版本失败: %v", err)
 	}
 
@@ -498,7 +591,6 @@ func (a *App) GetOptiFineVersions(mcVersion string) ([]LoaderInfo, error) {
 
 		versionName := entry.Type + "_" + entry.Patch
 
-		// BMCLAPI 镜像下载 URL
 		downloadURL := fmt.Sprintf(
 			"https://bmclapi2.bangbang93.com/optifine/%s/%s/%s",
 			entry.MCVersion, entry.Type, entry.Patch,
@@ -522,9 +614,8 @@ func (a *App) GetOptiFineVersions(mcVersion string) ([]LoaderInfo, error) {
 	return loaders, nil
 }
 
-// ===== 加载器安装（完全按照 PCL 的逻辑） =====
+// ===== 加载器安装 =====
 
-// extractForgeInstaller 提取 bangbang93 ForgeInstaller 到临时目录
 func (a *App) extractForgeInstaller() (string, error) {
 	tempDir := os.Getenv("TEMP")
 	if tempDir == "" {
@@ -532,30 +623,28 @@ func (a *App) extractForgeInstaller() (string, error) {
 	}
 
 	cacheDir := filepath.Join(tempDir, "qgl_cache")
-	if err := os.MkdirAll(cacheDir, 0755); err != nil {
+	if err := os.MkdirAll(cacheDir, 0700); err != nil {
 		return "", fmt.Errorf("创建缓存目录失败: %v", err)
 	}
 
 	installerPath := filepath.Join(cacheDir, "forge_installer.jar")
 
-	// 如果已存在且大小正确，直接返回
 	if info, err := os.Stat(installerPath); err == nil && info.Size() == int64(len(forgeInstallerJar)) {
 		return installerPath, nil
 	}
 
-	// 写入文件
-	if err := os.WriteFile(installerPath, forgeInstallerJar, 0644); err != nil {
-		return "", fmt.Errorf("提取 ForgeInstaller 失败: %v", err)
+	// 安装器 jar 走原子私有写：避免进程在落盘途中崩溃留下半截 jar，并拒绝沿既有
+	// 符号链接把安装器写到缓存目录外。
+	if err := secureWritePrivateFile(installerPath, forgeInstallerJar); err != nil {
+		return "", fmt.Errorf("提取 ForgeInstaller 失败: %w", err)
 	}
 
 	return installerPath, nil
 }
 
-// isOldForge 判断是否为旧版 Forge（版本号 < 20，不需要运行安装器）
 func isOldForge(versionStr string) bool {
-	// versionStr 类似 "1.16.5-34.1.0" 或 "34.1.0"
 	parts := strings.Split(versionStr, "-")
-	verPart := parts[len(parts)-1] // 取最后一段
+	verPart := parts[len(parts)-1]
 	majorStr := strings.Split(verPart, ".")[0]
 	major, err := strconv.Atoi(majorStr)
 	if err != nil {
@@ -564,11 +653,16 @@ func isOldForge(versionStr string) bool {
 	return major < 20
 }
 
-// InstallForge 安装 Forge（完全按照 PCL 逻辑）
 func (a *App) InstallForge(mcVersion string, forgeVersion string) error {
+	if !isValidMCVersion(mcVersion) {
+		return fmt.Errorf("无效的 Minecraft 版本格式")
+	}
+	if !isSafeFileName(forgeVersion) {
+		return fmt.Errorf("无效的 Forge 版本格式")
+	}
+
 	a.writeLog("========== 开始安装 Forge: MC=%s, Forge=%s ==========", mcVersion, forgeVersion)
 
-	// forgeVersion 可能是 "47.3.0" 或完整版 "1.20.1-47.3.0"
 	fullVersion := forgeVersion
 	if !strings.Contains(forgeVersion, mcVersion) {
 		fullVersion = mcVersion + "-" + forgeVersion
@@ -578,27 +672,21 @@ func (a *App) InstallForge(mcVersion string, forgeVersion string) error {
 	mcDir := a.GetMinecraftDir()
 	a.writeLog(".minecraft 目录: %s", mcDir)
 
-	// 1. 下载 Forge installer
 	tempDir := os.Getenv("TEMP")
 	if tempDir == "" {
 		tempDir = filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Local", "Temp")
 	}
 
-	// Forge 阶段划分：安装器下载 0-30%，支持库 35-90%，运行安装器 90-100%
-	a.setProgressScale(0, 30)
-
 	installerPath := filepath.Join(tempDir, fmt.Sprintf("forge-%s-installer.jar", fullVersion))
 
 	a.emitProgress("downloading", "下载 Forge 安装器", 0, 0)
 
-	// BMCLAPI 镜像下载
 	downloadURL := fmt.Sprintf(
 		"https://bmclapi2.bangbang93.com/maven/net/minecraftforge/forge/%s/forge-%s-installer.jar",
 		fullVersion, fullVersion,
 	)
 	a.writeLog("下载 URL: %s", downloadURL)
 
-	// 删除旧的安装器文件（避免下载跳过损坏文件）
 	os.Remove(installerPath)
 
 	if err := a.downloadFile(downloadURL, installerPath, true); err != nil {
@@ -606,41 +694,28 @@ func (a *App) InstallForge(mcVersion string, forgeVersion string) error {
 		return fmt.Errorf("下载 Forge 安装器失败: %v", err)
 	}
 
-	// 检查下载的文件大小
 	if info, err := os.Stat(installerPath); err == nil {
 		a.writeLog("安装器文件大小: %d 字节", info.Size())
-	} else {
-		a.writeLog("无法获取安装器文件信息: %v", err)
 	}
 
-	// 2. 判断是新版还是旧版
 	isOld := isOldForge(fullVersion)
-	a.writeLog("是否为旧版 Forge (<20): %v (isOldForge 判断)", isOld)
+	a.writeLog("是否为旧版 Forge (<20): %v", isOld)
 
 	if isOld {
-		// 旧版 Forge（方式 B）：直接解压 installer jar，不需要运行安装器
-		a.setProgressScale(35, 95)
 		a.emitProgress("downloading", "安装旧版 Forge", 0, 0)
 		return a.installOldForge(installerPath, mcDir, mcVersion)
 	}
 
-	// 3. 新版 Forge（方式 A）：先分析支持库，再运行 bangbang93 ForgeInstaller
-	a.setProgressScale(35, 90)
 	a.emitProgress("downloading", "分析 Forge 支持库", 0, 0)
 
-	// 3.1 解压 installer 获取支持库列表并下载
 	if err := a.downloadForgeLibraries(installerPath, mcDir, mcVersion); err != nil {
 		a.writeLog("下载 Forge 支持库失败（将继续尝试安装）: %v", err)
 	}
 
-	// 3.2 确保 launcher_profiles.json 存在
 	a.ensureLauncherProfiles(mcDir)
 
-	// 3.3 记录当前版本文件夹列表（在运行安装器之前）
 	oldVersions := a.getVersionFolderList(mcDir)
 
-	// 3.4 运行 bangbang93 ForgeInstaller
-	a.setProgressScale(90, 100)
 	a.emitProgress("downloading", "运行 Forge 安装器", 0, 0)
 
 	err := a.runForgeInstaller(installerPath, mcDir)
@@ -648,13 +723,11 @@ func (a *App) InstallForge(mcVersion string, forgeVersion string) error {
 		return err
 	}
 
-	// 3.5 查找安装器创建的版本文件夹
 	newVersionFolder := a.findNewVersionFolder(mcDir, oldVersions, mcVersion, "forge")
 	if newVersionFolder == "" {
 		return fmt.Errorf("Forge 安装器运行完成但未找到版本文件夹")
 	}
 
-	// 3.6 验证安装
 	if !a.validateVersionInstallation(newVersionFolder) {
 		os.RemoveAll(newVersionFolder)
 		return fmt.Errorf("Forge 安装验证失败：版本 JSON 无效")
@@ -662,13 +735,11 @@ func (a *App) InstallForge(mcVersion string, forgeVersion string) error {
 
 	fmt.Printf("Forge 安装成功: %s\n", filepath.Base(newVersionFolder))
 
-	// 3.7 清理安装器
 	os.Remove(installerPath)
 
 	return nil
 }
 
-// installOldForge 旧版 Forge 安装（方式 B，不需要运行安装器）
 func (a *App) installOldForge(installerPath string, mcDir string, mcVersion string) error {
 	r, err := zip.OpenReader(installerPath)
 	if err != nil {
@@ -676,16 +747,10 @@ func (a *App) installOldForge(installerPath string, mcDir string, mcVersion stri
 	}
 	defer r.Close()
 
-	// 读取 install_profile.json
 	var installProfile map[string]interface{}
 	for _, f := range r.File {
 		if f.Name == "install_profile.json" {
-			rc, err := f.Open()
-			if err != nil {
-				return fmt.Errorf("读取 install_profile.json 失败: %v", err)
-			}
-			data, err := io.ReadAll(rc)
-			rc.Close()
+			data, err := readZipEntryLimited(f, maxInstallerJSONBytes)
 			if err != nil {
 				return fmt.Errorf("读取 install_profile.json 失败: %v", err)
 			}
@@ -700,7 +765,6 @@ func (a *App) installOldForge(installerPath string, mcDir string, mcVersion stri
 		return fmt.Errorf("安装器中未找到 install_profile.json")
 	}
 
-	// 确定版本 ID（从 install_profile.json 中获取）
 	targetVersion := ""
 	if id, ok := installProfile["id"].(string); ok && id != "" {
 		targetVersion = id
@@ -711,38 +775,38 @@ func (a *App) installOldForge(installerPath string, mcDir string, mcVersion stri
 
 	versionFolder := filepath.Join(mcDir, "versions", targetVersion)
 
-	// 创建版本文件夹
-	if err := os.MkdirAll(versionFolder, 0755); err != nil {
+	if err := os.MkdirAll(versionFolder, 0700); err != nil {
 		return fmt.Errorf("创建版本目录失败: %v", err)
 	}
 
 	if installProfile["install"] == nil {
-		// 中版：Legacy 方式 1
-		// 从安装器中提取版本 JSON
 		jsonPath, _ := installProfile["json"].(string)
 		if jsonPath == "" {
 			return fmt.Errorf("install_profile.json 中缺少 json 字段")
 		}
+		// Zip Slip 防护：验证 ZIP 内路径不逃逸
 		jsonPath = strings.TrimPrefix(jsonPath, "/")
+		safeJSONPath := isSafeRelPath(jsonPath)
+		if safeJSONPath == "" {
+			return fmt.Errorf("安装器中 JSON 路径不安全: %s", jsonPath)
+		}
 
 		var versionJSONData []byte
 		for _, f := range r.File {
-			if f.Name == jsonPath {
-				rc, err := f.Open()
+			if f.Name == safeJSONPath {
+				data, err := readZipEntryLimited(f, maxInstallerJSONBytes)
 				if err != nil {
 					return fmt.Errorf("读取版本 JSON 失败: %v", err)
 				}
-				versionJSONData, _ = io.ReadAll(rc)
-				rc.Close()
+				versionJSONData = data
 				break
 			}
 		}
 
 		if versionJSONData == nil {
-			return fmt.Errorf("安装器中未找到 %s", jsonPath)
+			return fmt.Errorf("安装器中未找到 %s", safeJSONPath)
 		}
 
-		// 设置版本 ID 和 inheritsFrom
 		var versionJSON map[string]interface{}
 		if err := json.Unmarshal(versionJSONData, &versionJSON); err != nil {
 			return fmt.Errorf("解析版本 JSON 失败: %v", err)
@@ -752,44 +816,67 @@ func (a *App) installOldForge(installerPath string, mcDir string, mcVersion stri
 			versionJSON["inheritsFrom"] = mcVersion
 		}
 
-		// 保存版本 JSON
-		outputData, _ := json.MarshalIndent(versionJSON, "", "  ")
 		jsonFilePath := filepath.Join(versionFolder, targetVersion+".json")
-		if err := os.WriteFile(jsonFilePath, outputData, 0644); err != nil {
-			return fmt.Errorf("保存版本 JSON 失败: %v", err)
+		// 复用安装包 JSON 的 16MiB 读取上限作为落盘上限：输出来自该安装包，体积只会更小；
+		// 走有界原子私有写，Marshal/超量/落盘任一失败都返回，不再吞错或留下半截文件。
+		if err := writePrivateJSONBounded(jsonFilePath, versionJSON, maxInstallerJSONBytes); err != nil {
+			return fmt.Errorf("保存版本 JSON 失败: %w", err)
 		}
 
-		// 解压 maven 文件到 libraries 目录
 		r.Close()
 		if err := a.extractMavenFiles(installerPath, mcDir); err != nil {
 			fmt.Printf("解压 maven 文件失败（可能不影响启动）: %v\n", err)
 		}
 	} else {
-		// 旧版：Legacy 方式 2
 		installInfo := installProfile["install"].(map[string]interface{})
 		filePath, _ := installInfo["filePath"].(string)
 		pathStr, _ := installInfo["path"].(string)
 
-		// 提取 Jar 文件到 libraries
 		if pathStr != "" && filePath != "" {
-			libPath := filepath.Join(mcDir, "libraries", strings.ReplaceAll(pathStr, "/", string(os.PathSeparator)))
-			os.MkdirAll(filepath.Dir(libPath), 0755)
+			// Zip Slip 防护：安装器给出的 Maven 路径与 zip 内条目名均走严格
+			// 正斜杠相对路径白名单（拒盘符、反斜杠、冒号、保留设备名、.. 段）。
+			safePathStr := SafeMavenRelPath(pathStr)
+			safeFilePath := SafeMavenRelPath(filePath)
+			if safePathStr == "" || safeFilePath == "" {
+				return fmt.Errorf("安装器中路径不安全，跳过")
+			}
+			libPath := filepath.Join(mcDir, "libraries", filepath.FromSlash(safePathStr))
+			// 内嵌库用 os.OpenFile 直接落盘，必须先确保父目录存在且收权 0700；
+			// 原先忽略 MkdirAll 错误会让随后的 OpenFile 报一个更难定位的失败。
+			if err := ensurePrivateDir(filepath.Dir(libPath)); err != nil {
+				return fmt.Errorf("创建安装器内嵌库目录失败: %w", err)
+			}
 
 			for _, f := range r.File {
-				if f.Name == filePath {
+				if f.Name == safeFilePath {
+					if f.UncompressedSize64 > uint64(maxInstallerLibBytes) {
+						return fmt.Errorf("安装器内嵌库过大(解压炸弹防护): %s", safeFilePath)
+					}
+					// 内嵌库同样拒绝符号链接 / 设备等特殊条目，只允许普通文件落盘。
+					if f.Mode()&unsafeEntryMode != 0 {
+						return fmt.Errorf("安装器内嵌库是不允许的特殊类型: %s", safeFilePath)
+					}
 					rc, err := f.Open()
 					if err != nil {
 						break
 					}
-					data, _ := io.ReadAll(rc)
+					out, err := os.OpenFile(libPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+					if err != nil {
+						rc.Close()
+						break
+					}
+					n, copyErr := io.Copy(out, io.LimitReader(rc, maxInstallerLibBytes+1))
+					out.Close()
 					rc.Close()
-					os.WriteFile(libPath, data, 0644)
+					if copyErr != nil || n > maxInstallerLibBytes {
+						os.Remove(libPath)
+						return fmt.Errorf("安装器内嵌库超过 %d 字节上限(解压炸弹防护): %s", maxInstallerLibBytes, safeFilePath)
+					}
 					break
 				}
 			}
 		}
 
-		// 提取版本 JSON
 		versionInfo := installProfile["versionInfo"]
 		if versionInfo != nil {
 			vi := versionInfo.(map[string]interface{})
@@ -797,13 +884,15 @@ func (a *App) installOldForge(installerPath string, mcDir string, mcVersion stri
 			if vi["inheritsFrom"] == nil {
 				vi["inheritsFrom"] = mcVersion
 			}
-			outputData, _ := json.MarshalIndent(vi, "", "  ")
 			jsonFilePath := filepath.Join(versionFolder, targetVersion+".json")
-			os.WriteFile(jsonFilePath, outputData, 0644)
+			// 旧版 Forge 分支此前完全忽略序列化与落盘错误且为非原子写，统一收口到
+			// 有界原子私有写，任一失败都向上返回（安装后续会校验，避免带病继续）。
+			if err := writePrivateJSONBounded(jsonFilePath, vi, maxInstallerJSONBytes); err != nil {
+				return fmt.Errorf("保存版本 JSON 失败: %w", err)
+			}
 		}
 	}
 
-	// 验证安装
 	if !a.validateVersionInstallation(versionFolder) {
 		os.RemoveAll(versionFolder)
 		return fmt.Errorf("旧版 Forge 安装验证失败")
@@ -811,13 +900,21 @@ func (a *App) installOldForge(installerPath string, mcDir string, mcVersion stri
 
 	fmt.Printf("旧版 Forge 安装成功: %s\n", targetVersion)
 
-	// 清理安装器
 	os.Remove(installerPath)
 
 	return nil
 }
 
-// extractMavenFiles 从安装器中解压 maven 文件到 libraries 目录
+// Forge/NeoForge 安装器是从镜像下载的不受信任 JAR，其中 maven/ 条目会被
+// 解压到 libraries。统一走 zipextract 安全解压内核：Zip Slip、符号链接等特殊
+// 条目、条目数 / 单条目 / 总量上限全部预检，落盘采用临时文件 + 原子替换。
+// 正常的依赖 jar 只有几 MB 到几十 MB，正常数据永远碰不到这些阈值。
+const (
+	maxMavenEntryBytes int64 = 256 << 20 // 单个 maven 条目 256 MiB
+	maxMavenTotalBytes int64 = 2 << 30   // maven 解压总量 2 GiB
+	maxMavenEntries          = 100000    // maven 条目数上限（inode 耗尽防护）
+)
+
 func (a *App) extractMavenFiles(installerPath string, mcDir string) error {
 	r, err := zip.OpenReader(installerPath)
 	if err != nil {
@@ -826,33 +923,19 @@ func (a *App) extractMavenFiles(installerPath string, mcDir string) error {
 	defer r.Close()
 
 	libsDir := filepath.Join(mcDir, "libraries")
-
-	for _, f := range r.File {
-		// 只解压 maven/ 目录下的文件
-		if strings.HasPrefix(f.Name, "maven/") && !f.FileInfo().IsDir() {
-			relPath := strings.TrimPrefix(f.Name, "maven/")
-			destPath := filepath.Join(libsDir, relPath)
-
-			os.MkdirAll(filepath.Dir(destPath), 0755)
-
-			rc, err := f.Open()
-			if err != nil {
-				continue
-			}
-			data, err := io.ReadAll(rc)
-			rc.Close()
-			if err != nil {
-				continue
-			}
-
-			os.WriteFile(destPath, data, 0644)
-		}
+	lim := zipExtractLimits{
+		EntryMax:   maxMavenEntryBytes,
+		TotalMax:   maxMavenTotalBytes,
+		MaxEntries: maxMavenEntries,
 	}
-
+	n, count, err := extractZipPrefixes(r.File, libsDir, []string{"maven/"}, lim, a.writeLog)
+	if err != nil {
+		return err
+	}
+	a.writeLog("maven 解压完成: %d 个文件，共 %d 字节", count, n)
 	return nil
 }
 
-// downloadForgeLibraries 分析并下载 Forge 支持库文件
 func (a *App) downloadForgeLibraries(installerPath string, mcDir string, mcVersion string) error {
 	r, err := zip.OpenReader(installerPath)
 	if err != nil {
@@ -860,20 +943,24 @@ func (a *App) downloadForgeLibraries(installerPath string, mcDir string, mcVersi
 	}
 	defer r.Close()
 
-	// 读取 install_profile.json 和 version.json
 	var profileData, versionData map[string]interface{}
 	for _, f := range r.File {
-		if f.Name == "install_profile.json" {
-			rc, _ := f.Open()
-			data, _ := io.ReadAll(rc)
-			rc.Close()
-			json.Unmarshal(data, &profileData)
-		}
-		if f.Name == "version.json" {
-			rc, _ := f.Open()
-			data, _ := io.ReadAll(rc)
-			rc.Close()
-			json.Unmarshal(data, &versionData)
+		if f.Name == "install_profile.json" || f.Name == "version.json" {
+			// 安装器 JSON 不受信任，限 16 MiB 防解压炸弹；超限/损坏就跳过该文件。
+			data, err := readZipEntryLimited(f, maxInstallerJSONBytes)
+			if err != nil {
+				fmt.Printf("跳过安装器条目 %s: %v\n", f.Name, err)
+				continue
+			}
+			var target map[string]interface{}
+			if err := json.Unmarshal(data, &target); err != nil {
+				continue
+			}
+			if f.Name == "install_profile.json" {
+				profileData = target
+			} else {
+				versionData = target
+			}
 		}
 	}
 
@@ -881,7 +968,6 @@ func (a *App) downloadForgeLibraries(installerPath string, mcDir string, mcVersi
 		return fmt.Errorf("未找到 install_profile.json")
 	}
 
-	// 合并两个 JSON 的 libraries
 	var allLibs []interface{}
 	if libs, ok := profileData["libraries"].([]interface{}); ok {
 		allLibs = append(allLibs, libs...)
@@ -892,21 +978,13 @@ func (a *App) downloadForgeLibraries(installerPath string, mcDir string, mcVersi
 		}
 	}
 
-	// 下载每个支持库（先收集任务再带计数进度下载）
 	libsDir := filepath.Join(mcDir, "libraries")
-	type libDlTask struct {
-		url  string
-		path string
-		name string
-	}
-	var libTasks []libDlTask
 	for _, lib := range allLibs {
 		libMap, ok := lib.(map[string]interface{})
 		if !ok {
 			continue
 		}
 
-		// 获取下载信息
 		downloads, ok := libMap["downloads"].(map[string]interface{})
 		if !ok {
 			continue
@@ -919,32 +997,36 @@ func (a *App) downloadForgeLibraries(installerPath string, mcDir string, mcVersi
 
 		url, _ := artifact["url"].(string)
 		path, _ := artifact["path"].(string)
+		sha1, _ := artifact["sha1"].(string)
 		if url == "" || path == "" {
 			continue
 		}
 
-		// 替换为 BMCLAPI 镜像
-		url = strings.Replace(url, "https://maven.minecraftforge.net/", "https://bmclapi2.bangbang93.com/maven/", 1)
-		url = strings.Replace(url, "https://maven.neoforged.net/releases/", "https://bmclapi2.bangbang93.com/maven/", 1)
-		url = strings.Replace(url, "https://maven.fabricmc.net/", "https://bmclapi2.bangbang93.com/maven/", 1)
-
-		destPath := filepath.Join(libsDir, path)
-		if _, err := os.Stat(destPath); err == nil {
-			continue // 已存在
+		// 安装器不可信：库 URL 必须落在官方/可信 Maven 主机白名单内，
+		// 否则攻击者可借安装器把任意 jar 拉进 classpath（供应链 RCE）。
+		if !isAllowedMavenLibURL(url) {
+			fmt.Printf("跳过非可信 Maven 主机的库（防止供应链投毒）: %s\n", url)
+			continue
 		}
 
-		libTasks = append(libTasks, libDlTask{url: url, path: destPath, name: filepath.Base(path)})
-	}
+		url = rewriteMavenLibURLToBMCL(url)
 
-	for i, task := range libTasks {
-		a.emitProgress("downloading", fmt.Sprintf("支持库 %d/%d: %s", i+1, len(libTasks), task.name), int64(i+1), int64(len(libTasks)))
-		if err := a.downloadFile(task.url, task.path, false); err != nil {
-			fmt.Printf("下载支持库失败 %s: %v\n", task.name, err)
+		// Zip Slip 防护：库路径走严格 Maven 相对路径白名单
+		safePath := SafeMavenRelPath(path)
+		if safePath == "" {
+			fmt.Printf("跳过不安全的库路径: %s\n", path)
+			continue
+		}
+		destPath := filepath.Join(libsDir, filepath.FromSlash(safePath))
+
+		// 走带官方 sha1 的下载：已存在的库也会经侧车摘要链复核，
+		// 避免“文件在就直接信任”导致被替换的 jar 被加载。
+		// 个别安装器确实缺 sha1 字段时仍下载（主机已白名单），但不再自行跳过校验。
+		if err := a.downloadVerifiedFile(url, destPath, strings.TrimSpace(sha1), false); err != nil {
+			fmt.Printf("下载/校验支持库失败 %s: %v\n", path, err)
 		}
 	}
 
-	// === 新版 Forge 需要 Mappings 文件（参考 PCL 的 DlClientFix） ===
-	// install_profile.json 中的 data.MOJMAPS 字段引用了原版 MC 的 client_mappings
 	dataSection, hasData := profileData["data"].(map[string]interface{})
 	if !hasData {
 		fmt.Printf("未找到 data 字段（跳过 Mappings 下载）\n")
@@ -959,11 +1041,13 @@ func (a *App) downloadForgeLibraries(installerPath string, mcDir string, mcVersi
 }
 
 // ensureForgeMappings 确保 Forge 新版需要的 Mappings 文件存在
-// 使用 CMD 命令（Invoke-WebRequest）下载文件
+// 安全修复：移除 PowerShell 命令，改用 Go 原生 HTTP 下载，防止命令注入
+// maxMappingsDownloadBytes 限制 Forge mappings 下载体积为 1 GiB，正常映射文件只有十几 MB，只有明显炸磁盘的响应才会触发。
+const maxMappingsDownloadBytes int64 = 1 << 30
+
 func (a *App) ensureForgeMappings(installerPath string, mcDir string) {
 	a.writeLog("===== 开始检查 Forge Mappings 文件 =====")
 
-	// 1. 从 install_profile.json 获取配置
 	r, err := zip.OpenReader(installerPath)
 	if err != nil {
 		a.writeLog("无法打开安装器（跳过 Mappings 检查）: %v", err)
@@ -975,13 +1059,13 @@ func (a *App) ensureForgeMappings(installerPath string, mcDir string) {
 	var mcVersion string
 	for _, f := range r.File {
 		if f.Name == "install_profile.json" {
-			rc, _ := f.Open()
-			data, _ := io.ReadAll(rc)
-			rc.Close()
-
+			data, err := readZipEntryLimited(f, maxInstallerJSONBytes)
+			if err != nil {
+				a.writeLog("读取 install_profile.json 失败(条目过大或损坏，跳过): %v", err)
+				break
+			}
 			json.Unmarshal(data, &installProfile)
 
-			// 获取 mcVersion - 新版 Forge 中 minecraft 是字符串格式 "1.19.2"
 			if minecraftVal, ok := installProfile["minecraft"]; ok {
 				if mv, ok := minecraftVal.(string); ok {
 					mcVersion = mv
@@ -997,7 +1081,6 @@ func (a *App) ensureForgeMappings(installerPath string, mcDir string) {
 		return
 	}
 
-	// 2. 检查是否需要 MOJMAPS
 	dataSection, ok := installProfile["data"].(map[string]interface{})
 	if !ok {
 		a.writeLog("未找到 data 字段（跳过 Mappings 检查）")
@@ -1016,7 +1099,6 @@ func (a *App) ensureForgeMappings(installerPath string, mcDir string) {
 		return
 	}
 
-	// 解析 MOJMAPS.client: [net.minecraft:client:1.19.2-20220805.130853:mappings@txt]
 	clientValue = strings.Trim(clientValue, "[]")
 	atIndex := strings.Index(clientValue, "@")
 	if atIndex == -1 {
@@ -1027,39 +1109,30 @@ func (a *App) ensureForgeMappings(installerPath string, mcDir string) {
 	originalName := clientValue[:atIndex]
 	extension := clientValue[atIndex+1:]
 
-	parts := strings.Split(originalName, ":")
-	if len(parts) < 3 {
-		a.writeLog("MOJMAPS.client Maven 格式错误（跳过 Mappings 检查）")
+	// 坐标与扩展名来自不可信的安装器 JSON，不能再用 Split 后原样拼 filepath.Join，
+	// 否则 ".." 段 / 分隔符 / 带穿越的扩展名会把 mappings 写到 libraries 之外。
+	// 统一走严格白名单推导，并强制结果落在 <mcDir>/libraries 内。
+	targetPath, ok := SafeMojmapsMappingsPath(mcDir, originalName, extension)
+	if !ok {
+		a.writeLog("MOJMAPS.client 坐标或扩展名未通过路径白名单（跳过 Mappings 检查）")
 		return
 	}
 
-	groupPath := strings.Replace(parts[0], ".", "/", -1)
-	artifact := parts[1]
-	versionPart := parts[2]
-
-	targetPath := filepath.Join(mcDir, "libraries", groupPath, artifact, versionPart,
-		fmt.Sprintf("%s-%s-mappings.%s", artifact, versionPart, extension))
-
 	a.writeLog("目标路径: %s", targetPath)
 
-	// 检查是否已存在
 	if _, err := os.Stat(targetPath); err == nil {
 		a.writeLog("Mappings 文件已存在: %s", targetPath)
 		return
 	}
 
-	// 3. 从原版版本 JSON 获取 client_mappings URL
 	versionDir := filepath.Join(mcDir, "versions", mcVersion)
 	jsonPath := filepath.Join(versionDir, mcVersion+".json")
 
-	jsonData, err := os.ReadFile(jsonPath)
-	if err != nil {
-		a.writeLog("无法读取原版版本 JSON: %v", err)
+	var rawJSON map[string]interface{}
+	if err := readLocalJSONBounded(jsonPath, &rawJSON, 0, "原版版本 JSON"); err != nil {
+		a.writeLog("无法读取/解析原版版本 JSON: %v", err)
 		return
 	}
-
-	var rawJSON map[string]interface{}
-	json.Unmarshal(jsonData, &rawJSON)
 
 	downloads, _ := rawJSON["downloads"].(map[string]interface{})
 	if downloads == nil {
@@ -1079,31 +1152,60 @@ func (a *App) ensureForgeMappings(installerPath string, mcDir string) {
 		return
 	}
 
-	// 替换为 BMCLAPI 镜像
-	mappingsURL = strings.Replace(mappingsURL, "https://piston-data.mojang.com/", "https://bmclapi2.bangbang93.com/", 1)
-	mappingsURL = strings.Replace(mappingsURL, "https://launcher.mojang.com/", "https://bmclapi2.bangbang93.com/", 1)
-
-	a.writeLog("使用 CMD 命令下载 Mappings 文件...")
-	a.writeLog("下载 URL: %s", mappingsURL)
-	a.writeLog("保存到: %s", targetPath)
-
-	// 4. 创建目标目录
-	os.MkdirAll(filepath.Dir(targetPath), 0755)
-
-	// 5. 使用 PowerShell Invoke-WebRequest 下载文件（带 User-Agent 避免被拦截）
-	a.writeLog("执行下载命令...")
-	downloadCmd := exec.Command("powershell", "-Command",
-		fmt.Sprintf("[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $headers = @{'User-Agent'='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.216 CosyBrowser/146.3.1'}; Invoke-WebRequest -Uri '%s' -OutFile '%s' -UseBasicParsing -Headers $headers",
-			mappingsURL, targetPath))
-	downloadCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	output, err := downloadCmd.CombinedOutput()
-
-	if err != nil {
-		a.writeLog("CMD 下载失败: %v, 输出: %s", err, string(output))
+	// 安全验证：只允许 HTTPS
+	if !isHTTPSURL(mappingsURL) {
+		a.writeLog("跳过不安全的下载 URL（非 HTTPS）: %s", mappingsURL)
 		return
 	}
 
-	// 6. 验证文件是否存在且不为空
+	mappingsURL = rewriteMappedDataURLToBMCL(mappingsURL)
+
+	a.writeLog("使用 Go 原生 HTTP 下载 Mappings 文件...")
+	a.writeLog("下载 URL: %s", mappingsURL)
+	a.writeLog("保存到: %s", targetPath)
+
+	// 这里是手写流式下载（os.OpenFile 直接落盘），由本处显式确保目录 0700 并收权。
+	if err := ensurePrivateDir(filepath.Dir(targetPath)); err != nil {
+		a.writeLog("创建目标目录失败: %v", err)
+		return
+	}
+
+	// 安全修复：使用 Go 原生 HTTP 下载，替代 PowerShell 命令，防止命令注入
+	client := safeHTTPClient()
+	req, err := http.NewRequest("GET", mappingsURL, nil)
+	if err != nil {
+		a.writeLog("创建下载请求失败: %v", err)
+		return
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		a.writeLog("下载失败: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		a.writeLog("下载失败: HTTP %d", resp.StatusCode)
+		return
+	}
+
+	out, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0600)
+	if err != nil {
+		a.writeLog("创建目标文件失败: %v", err)
+		return
+	}
+	defer out.Close()
+
+	limited := io.LimitReader(resp.Body, maxMappingsDownloadBytes+1)
+	n, copyErr := io.Copy(out, limited)
+	if copyErr != nil || n > maxMappingsDownloadBytes {
+		a.writeLog("mappings 文件超过 %d 字节上限，中止下载", maxMappingsDownloadBytes)
+		os.Remove(targetPath)
+		return
+	}
+
 	fileInfo, statErr := os.Stat(targetPath)
 	if statErr != nil {
 		a.writeLog("下载后验证文件失败: %v", statErr)
@@ -1119,10 +1221,7 @@ func (a *App) ensureForgeMappings(installerPath string, mcDir string) {
 	a.writeLog("Mappings 下载成功! 文件大小: %d 字节, 路径: %s", fileInfo.Size(), targetPath)
 }
 
-// downloadForgeMappings 下载 Forge 新版所需的 client_mappings 文件（保留旧函数以保持兼容性）
-// Forge 安装器期望的路径格式: libraries/net/minecraft/client/{mcpVersion}/client-{mcpVersion}-mappings.txt
 func (a *App) downloadForgeMappings(mcDir string, mcVersion string, installerPath string) {
-	// 1. 从 install_profile.json 获取 MOJMAPS 配置
 	r, err := zip.OpenReader(installerPath)
 	if err != nil {
 		fmt.Printf("无法打开安装器（跳过 Mappings 下载）: %v\n", err)
@@ -1133,9 +1232,11 @@ func (a *App) downloadForgeMappings(mcDir string, mcVersion string, installerPat
 	var installProfile map[string]interface{}
 	for _, f := range r.File {
 		if f.Name == "install_profile.json" {
-			rc, _ := f.Open()
-			data, _ := io.ReadAll(rc)
-			rc.Close()
+			data, err := readZipEntryLimited(f, maxInstallerJSONBytes)
+			if err != nil {
+				fmt.Printf("读取 install_profile.json 失败(条目过大或损坏，跳过): %v\n", err)
+				break
+			}
 			json.Unmarshal(data, &installProfile)
 			break
 		}
@@ -1146,7 +1247,6 @@ func (a *App) downloadForgeMappings(mcDir string, mcVersion string, installerPat
 		return
 	}
 
-	// 2. 获取 MOJMAPS 数据（包含 mcpVersion）
 	dataSection, ok := installProfile["data"].(map[string]interface{})
 	if !ok {
 		fmt.Printf("未找到 data 字段（跳过 Mappings 下载）\n")
@@ -1167,29 +1267,20 @@ func (a *App) downloadForgeMappings(mcDir string, mcVersion string, installerPat
 
 	fmt.Printf("检测到 Forge MOJMAPS: %s\n", mcpVersion)
 
-	// 3. 构建目标路径
-	// Forge 安装器期望的路径: libraries/net/minecraft/client/{mcpVersion}/client-{mcpVersion}-mappings.txt
-	targetPath := filepath.Join(mcDir, "libraries", "net", "minecraft", "client", mcpVersion, fmt.Sprintf("client-%s-mappings.txt", mcpVersion))
+	targetPath := filepath.Join(mcDir, "libraries", "net", "minecraft", "client", mcpVersion,
+		fmt.Sprintf("client-%s-mappings.txt", mcpVersion))
 
-	// 检查是否已存在
 	if _, err := os.Stat(targetPath); err == nil {
 		fmt.Printf("Mappings 文件已存在: %s\n", targetPath)
 		return
 	}
 
-	// 4. 尝试从原版版本 JSON 获取 client_mappings 下载信息
 	versionDir := filepath.Join(mcDir, "versions", mcVersion)
 	jsonPath := filepath.Join(versionDir, mcVersion+".json")
 
-	jsonData, err := os.ReadFile(jsonPath)
-	if err != nil {
-		fmt.Printf("无法读取原版版本 JSON（跳过 Mappings 下载）: %v\n", err)
-		return
-	}
-
 	var rawJSON map[string]interface{}
-	if err := json.Unmarshal(jsonData, &rawJSON); err != nil {
-		fmt.Printf("解析原版版本 JSON 失败（跳过 Mappings 下载）: %v\n", err)
+	if err := readLocalJSONBounded(jsonPath, &rawJSON, 0, "原版版本 JSON"); err != nil {
+		fmt.Printf("无法读取/解析原版版本 JSON（跳过 Mappings 下载）: %v\n", err)
 		return
 	}
 
@@ -1211,24 +1302,21 @@ func (a *App) downloadForgeMappings(mcDir string, mcVersion string, installerPat
 		return
 	}
 
-	// 5. 替换为 BMCLAPI 镜像
-	mappingsURL = strings.Replace(mappingsURL, "https://piston-data.mojang.com/", "https://bmclapi2.bangbang93.com/", 1)
-	mappingsURL = strings.Replace(mappingsURL, "https://launcher.mojang.com/", "https://bmclapi2.bangbang93.com/", 1)
+	if !isHTTPSURL(mappingsURL) {
+		fmt.Printf("跳过不安全的下载 URL（非 HTTPS）: %s\n", mappingsURL)
+		return
+	}
 
-	// 6. 创建目标目录
-	os.MkdirAll(filepath.Dir(targetPath), 0755)
+	mappingsURL = rewriteMappedDataURLToBMCL(mappingsURL)
 
-	// 7. 下载文件（先下载为临时文件，然后重命名）
 	tempPath := targetPath + ".tmp"
 	fmt.Printf("下载 Forge Mappings (%s): %s\n", mcpVersion, mappingsURL)
 	if err := a.downloadFile(mappingsURL, tempPath, false); err != nil {
-		// 如果临时文件已存在，删除它
 		os.Remove(tempPath)
 		fmt.Printf("下载 Mappings 失败: %v\n", err)
 		return
 	}
 
-	// 8. 重命名为 Forge 安装器期望的名称
 	if err := os.Rename(tempPath, targetPath); err != nil {
 		os.Remove(tempPath)
 		fmt.Printf("重命名 Mappings 文件失败: %v\n", err)
@@ -1238,19 +1326,20 @@ func (a *App) downloadForgeMappings(mcDir string, mcVersion string, installerPat
 	fmt.Printf("Mappings 下载成功: %s\n", targetPath)
 }
 
-// ensureLauncherProfiles 确保 launcher_profiles.json 存在（Forge 安装器需要）
 func (a *App) ensureLauncherProfiles(mcDir string) {
 	profilesPath := filepath.Join(mcDir, "launcher_profiles.json")
 	if _, err := os.Stat(profilesPath); os.IsNotExist(err) {
 		profiles := map[string]interface{}{
 			"profiles": map[string]interface{}{},
 		}
-		data, _ := json.MarshalIndent(profiles, "", "  ")
-		os.WriteFile(profilesPath, data, 0644)
+		// launcher_profiles.json 是启动器状态文件，有界原子私有写防半截写与符号链接写穿；
+		// 序列化错误也不再被丢弃。
+		if err := writePrivateJSON(profilesPath, profiles); err != nil {
+			fmt.Printf("创建 launcher_profiles.json 失败: %v\n", err)
+		}
 	}
 }
 
-// getVersionFolderList 获取当前版本文件夹列表
 func (a *App) getVersionFolderList(mcDir string) map[string]bool {
 	versionsDir := filepath.Join(mcDir, "versions")
 	result := map[string]bool{}
@@ -1269,14 +1358,11 @@ func (a *App) getVersionFolderList(mcDir string) map[string]bool {
 	return result
 }
 
-// runForgeInstaller 运行 bangbang93 ForgeInstaller（完全按照 PCL 的命令行）
 func (a *App) runForgeInstaller(installerPath string, mcDir string) error {
 	a.writeLog("===== 开始运行 ForgeInstaller =====")
 
-	// 0. 确保新版 Forge 需要的 Mappings 文件存在（参考 PCL 的 DlClientFix）
 	a.ensureForgeMappings(installerPath, mcDir)
 
-	// 1. 提取 bangbang93 ForgeInstaller
 	bbInstallerPath, err := a.extractForgeInstaller()
 	if err != nil {
 		a.writeLog("提取 ForgeInstaller 失败: %v", err)
@@ -1285,7 +1371,6 @@ func (a *App) runForgeInstaller(installerPath string, mcDir string) error {
 	a.writeLog("ForgeInstaller 路径: %s", bbInstallerPath)
 	a.writeLog("Forge 安装器路径: %s", installerPath)
 
-	// 2. 选择 Java
 	javaEntry, err := a.selectJavaForInstaller()
 	if err != nil {
 		a.writeLog("选择 Java 失败: %v", err)
@@ -1293,7 +1378,6 @@ func (a *App) runForgeInstaller(installerPath string, mcDir string) error {
 	}
 	a.writeLog("使用 Java: %s (版本: %s, 主版本: %d)", javaEntry.Path, javaEntry.Version, javaEntry.MajorVer)
 
-	// 3. 构造命令行参数（完全按照 PCL 的方式）
 	classpath := bbInstallerPath + ";" + installerPath
 
 	args := []string{}
@@ -1304,16 +1388,32 @@ func (a *App) runForgeInstaller(installerPath string, mcDir string) error {
 
 	a.writeLog("完整命令: %s %s", javaEntry.Path, strings.Join(args, " "))
 
-	// 4. 启动进程
+	// 启动前对安装器 JVM 做目标审计：java 可执行、工作目录、绝对 classpath 的目录归属
+	// （bbInstaller / installer 各自的父目录 + mcDir）、主类与程序参数，阻止任何指向
+	// UNC / 目录穿越 / 允许目录之外的 jar/classpath。
+	forgeRoots := []string{mcDir, filepath.Dir(bbInstallerPath), filepath.Dir(installerPath)}
+	forgeAudit := AuditExternalJVM(ExternalJVMPlan{
+		JavaExe:      javaEntry.Path,
+		WorkDir:      mcDir,
+		Classpath:    []string{bbInstallerPath, installerPath},
+		MainClass:    "com.bangbang93.ForgeInstaller",
+		ProgramArgs:  []string{mcDir},
+		AllowedRoots: forgeRoots,
+	})
+	if forgeAudit.HasCritical() {
+		return fmt.Errorf("Forge 安装器启动审计未通过: %s", forgeAudit.FirstCriticalCode())
+	}
+
 	cmd := exec.Command(javaEntry.Path, args...)
 	cmd.Dir = mcDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	// Forge 安装器本身是个独立 JVM：不下发净化环境就会继承
+	// JAVA_TOOL_OPTIONS 一族，绕过 JVM 参数过滤注入 javaagent。
+	a.applySanitizedJVMEnv(cmd, "ForgeInstaller", nil)
 
-	// 5. 使用 CombinedOutput 捕获完整输出
 	output, runErr := cmd.CombinedOutput()
 	outputStr := string(output)
 
-	// 写入完整输出到日志
 	a.writeLog("----- ForgeInstaller 输出开始 -----")
 	if outputStr != "" {
 		for _, line := range strings.Split(outputStr, "\n") {
@@ -1327,7 +1427,6 @@ func (a *App) runForgeInstaller(installerPath string, mcDir string) error {
 		a.writeLog("进程退出错误: %v", runErr)
 	}
 
-	// 6. 检查输出中是否有 "true"（bangbang93 安装器成功标志，只看最后4行）
 	lines := strings.Split(outputStr, "\n")
 	var lastLines []string
 	for _, line := range lines {
@@ -1354,10 +1453,8 @@ func (a *App) runForgeInstaller(installerPath string, mcDir string) error {
 		return nil
 	}
 
-	// 严格按照用户要求：未检测到 "true" 标志即为安装失败，即使版本文件夹存在也不例外
 	a.writeLog("未检测到安装器成功标志 'true'，安装失败")
 
-	// 8. 返回详细错误信息
 	if runErr != nil {
 		errMsg := fmt.Errorf("Forge 安装器运行失败\nJava: %s (v%d)\n错误: %v\n\n完整输出:\n%s",
 			javaEntry.Path, javaEntry.MajorVer, runErr, outputStr)
@@ -1371,7 +1468,6 @@ func (a *App) runForgeInstaller(installerPath string, mcDir string) error {
 	return errMsg
 }
 
-// findNewVersionFolder 查找安装器新创建的版本文件夹
 func (a *App) findNewVersionFolder(mcDir string, oldVersions map[string]bool, mcVersion string, loaderType string) string {
 	versionsDir := filepath.Join(mcDir, "versions")
 
@@ -1380,14 +1476,12 @@ func (a *App) findNewVersionFolder(mcDir string, oldVersions map[string]bool, mc
 		return ""
 	}
 
-	// 优先查找新增的文件夹
 	for _, entry := range entries {
 		if !entry.IsDir() || oldVersions[entry.Name()] {
 			continue
 		}
 		name := entry.Name()
 		nameLower := strings.ToLower(name)
-		// 检查是否包含加载器类型和 MC 版本
 		if strings.Contains(nameLower, loaderType) && strings.Contains(nameLower, strings.ToLower(mcVersion)) {
 			versionFolder := filepath.Join(versionsDir, name)
 			if a.validateVersionInstallation(versionFolder) {
@@ -1396,7 +1490,6 @@ func (a *App) findNewVersionFolder(mcDir string, oldVersions map[string]bool, mc
 		}
 	}
 
-	// 如果没有找到新增的，查找所有匹配的文件夹
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
@@ -1414,14 +1507,16 @@ func (a *App) findNewVersionFolder(mcDir string, oldVersions map[string]bool, mc
 	return ""
 }
 
-// InstallFabric 安装 Fabric（直接下载 profile JSON + 预下载库文件）
 func (a *App) InstallFabric(mcVersion string, loaderVersion string) error {
+	if !isValidMCVersion(mcVersion) {
+		return fmt.Errorf("无效的 Minecraft 版本格式")
+	}
+	if !isSafeFileName(loaderVersion) {
+		return fmt.Errorf("无效的 Fabric Loader 版本格式")
+	}
+
 	mcDir := a.GetMinecraftDir()
 
-	// Fabric 阶段划分：profile 获取 + JSON 写入 0-15%，库文件 15-95%，验证 95-100%
-	a.setProgressScale(0, 15)
-
-	// 1. 获取 Fabric profile JSON（BMCLAPI 镜像）
 	profileURL := fmt.Sprintf(
 		"https://bmclapi2.bangbang93.com/fabric-meta/v2/versions/loader/%s/%s/profile/json",
 		mcVersion, loaderVersion,
@@ -1429,7 +1524,8 @@ func (a *App) InstallFabric(mcVersion string, loaderVersion string) error {
 
 	a.emitProgress("downloading", "获取 Fabric profile", 0, 0)
 
-	resp, err := http.Get(profileURL)
+	client := safeHTTPClient()
+	resp, err := client.Get(profileURL)
 	if err != nil {
 		return fmt.Errorf("获取 Fabric profile 失败: %v", err)
 	}
@@ -1440,40 +1536,28 @@ func (a *App) InstallFabric(mcVersion string, loaderVersion string) error {
 	}
 
 	var profileJSON map[string]interface{}
-	if err := json.NewDecoder(resp.Body).Decode(&profileJSON); err != nil {
+	if err := readAPIJSON(resp, &profileJSON); err != nil {
 		return fmt.Errorf("解析 Fabric profile 失败: %v", err)
 	}
 
-	// 2. 设置版本 ID
 	versionID := fmt.Sprintf("fabric-loader-%s-%s", loaderVersion, mcVersion)
 	profileJSON["id"] = versionID
 
-	// 3. 创建版本文件夹
 	versionDir := filepath.Join(mcDir, "versions", versionID)
-	if err := os.MkdirAll(versionDir, 0755); err != nil {
+	if err := os.MkdirAll(versionDir, 0700); err != nil {
 		return fmt.Errorf("创建版本目录失败: %v", err)
 	}
 
-	// 4. 保存版本 JSON
-	jsonData, err := json.MarshalIndent(profileJSON, "", "  ")
-	if err != nil {
-		a.cleanupFailedInstallation(mcDir, versionID)
-		return fmt.Errorf("序列化 JSON 失败: %v", err)
-	}
-
 	jsonPath := filepath.Join(versionDir, versionID+".json")
-	if err := os.WriteFile(jsonPath, jsonData, 0644); err != nil {
+	// 有界原子私有写：Marshal/超量/落盘任一失败都清理半成品并返回，不再原地截断写。
+	if err := writePrivateJSON(jsonPath, profileJSON); err != nil {
 		a.cleanupFailedInstallation(mcDir, versionID)
-		return fmt.Errorf("保存版本 JSON 失败: %v", err)
+		return fmt.Errorf("保存版本 JSON 失败: %w", err)
 	}
 
-	// Fabric 阶段划分：profile 获取 + JSON 写入 0-15%，库文件 15-95%，验证 95-100%
-	a.setProgressScale(15, 95)
 	a.emitProgress("downloading", "下载 Fabric 库文件", 0, 0)
 	a.downloadFabricLibraries(profileJSON, mcDir)
-	a.setProgressScale(95, 100)
 
-	// 6. 验证安装
 	if !a.validateVersionInstallation(versionDir) {
 		a.cleanupFailedInstallation(mcDir, versionID)
 		return fmt.Errorf("Fabric 安装验证失败")
@@ -1482,11 +1566,9 @@ func (a *App) InstallFabric(mcVersion string, loaderVersion string) error {
 	return nil
 }
 
-// downloadFabricLibraries 下载 Fabric 版本 JSON 中引用的所有库文件
 func (a *App) downloadFabricLibraries(profileJSON map[string]interface{}, mcDir string) {
 	libsDir := filepath.Join(mcDir, "libraries")
 
-	// 从 profileJSON 的 libraries 数组中提取需要下载的库
 	libs, ok := profileJSON["libraries"].([]interface{})
 	if !ok {
 		fmt.Printf("Fabric profile JSON 中没有 libraries 字段\n")
@@ -1494,19 +1576,12 @@ func (a *App) downloadFabricLibraries(profileJSON map[string]interface{}, mcDir 
 	}
 
 	downloadedCount := 0
-	// 先收集需要下载的库，再带计数进度下载
-	type fabLibTask struct {
-		url  string
-		path string
-	}
-	var fabTasks []fabLibTask
 	for _, libRaw := range libs {
 		libMap, ok := libRaw.(map[string]interface{})
 		if !ok {
 			continue
 		}
 
-		// 获取 downloads.artifact 信息
 		downloads, ok := libMap["downloads"].(map[string]interface{})
 		if !ok {
 			continue
@@ -1523,26 +1598,30 @@ func (a *App) downloadFabricLibraries(profileJSON map[string]interface{}, mcDir 
 			continue
 		}
 
-		// 替换为 BMCLAPI 镜像（覆盖所有已知的 Maven 仓库）
-		url = strings.Replace(url, "https://maven.fabricmc.net/", "https://bmclapi2.bangbang93.com/maven/", 1)
-		url = strings.Replace(url, "https://repo1.maven.org/maven2/", "https://bmclapi2.bangbang93.com/maven/", 1)
-		url = strings.Replace(url, "https://libraries.minecraft.net/", "https://bmclapi2.bangbang93.com/libraries/", 1)
-
-		destPath := filepath.Join(libsDir, path)
-
-		// 已存在则跳过
-		if _, err := os.Stat(destPath); err == nil {
+		// 供应链 RCE 防护（与 Forge 库一致）：profile JSON 不可信，artifact.url 可能被
+		// 篡改指向攻击者自己的 https 服务器。先对“原始”主机做白名单校验（在镜像
+		// 替换之前），拒绝非白名单主机 / userinfo / 非标端口，避免只校验 https scheme。
+		if !isAllowedMavenLibURL(url) {
+			fmt.Printf("跳过非信任主机的 Fabric 库 URL: %s\n", url)
 			continue
 		}
 
-		fabTasks = append(fabTasks, fabLibTask{url: url, path: destPath})
-	}
+		sha1, _ := artifact["sha1"].(string)
 
-	for i, task := range fabTasks {
-		a.emitProgress("downloading", fmt.Sprintf("Fabric 库文件 %d/%d", i+1, len(fabTasks)), int64(i+1), int64(len(fabTasks)))
-		os.MkdirAll(filepath.Dir(task.path), 0755)
-		if err := a.downloadFile(task.url, task.path, false); err != nil {
-			fmt.Printf("下载 Fabric 库失败: %v\n", err)
+		url = rewriteFabricLibURLToBMCL(url)
+
+		// Zip Slip 防护：库路径走严格 Maven 相对路径白名单
+		safePath := SafeMavenRelPath(path)
+		if safePath == "" {
+			fmt.Printf("跳过不安全的库路径: %s\n", path)
+			continue
+		}
+		destPath := filepath.Join(libsDir, filepath.FromSlash(safePath))
+
+		// 走带官方 sha1 锚点的下载（缺失时退化为侧车 UMFS/SHA512/SHA1 复核），
+		// 已存在文件也会复核，杜绝“预置坏 jar + os.Stat 跳过”。
+		if err := a.downloadVerifiedFile(url, destPath, strings.TrimSpace(sha1), false); err != nil {
+			fmt.Printf("下载 Fabric 库失败 %s: %v\n", path, err)
 		} else {
 			downloadedCount++
 		}
@@ -1553,9 +1632,14 @@ func (a *App) downloadFabricLibraries(profileJSON map[string]interface{}, mcDir 
 	}
 }
 
-// InstallNeoForge 安装 NeoForge（使用 bangbang93 ForgeInstaller）
 func (a *App) InstallNeoForge(mcVersion string, neoForgeVersion string) error {
-	// neoForgeVersion 可能是 "47.1.99" 或 "1.20.1-47.1.99"
+	if !isValidMCVersion(mcVersion) {
+		return fmt.Errorf("无效的 Minecraft 版本格式")
+	}
+	if !isSafeFileName(neoForgeVersion) {
+		return fmt.Errorf("无效的 NeoForge 版本格式")
+	}
+
 	apiName := neoForgeVersion
 	if !strings.Contains(neoForgeVersion, mcVersion+"-") && mcVersion == "1.20.1" {
 		apiName = mcVersion + "-" + neoForgeVersion
@@ -1563,53 +1647,40 @@ func (a *App) InstallNeoForge(mcVersion string, neoForgeVersion string) error {
 
 	mcDir := a.GetMinecraftDir()
 
-	// 确定包名
 	pkgName := "neoforge"
 	if mcVersion == "1.20.1" {
 		pkgName = "forge"
 	}
 
-	// 1. 下载 NeoForge installer
 	tempDir := os.Getenv("TEMP")
 	if tempDir == "" {
 		tempDir = filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Local", "Temp")
 	}
 
-	// NeoForge 阶段划分：安装器下载 0-30%，支持库 35-90%，运行安装器 90-100%
-	a.setProgressScale(0, 30)
-
 	installerPath := filepath.Join(tempDir, fmt.Sprintf("neoforge-%s-installer.jar", apiName))
 
 	a.emitProgress("downloading", "下载 NeoForge 安装器", 0, 0)
 
-	// BMCLAPI 镜像下载
 	downloadURL := fmt.Sprintf(
 		"https://bmclapi2.bangbang93.com/maven/net/neoforged/%s/%s/%s-%s-installer.jar",
 		pkgName, apiName, pkgName, apiName,
 	)
 
-	// 删除旧的安装器文件
 	os.Remove(installerPath)
 
 	if err := a.downloadFile(downloadURL, installerPath, true); err != nil {
 		return fmt.Errorf("下载 NeoForge 安装器失败: %v", err)
 	}
 
-	// 2. 分析并下载支持库
-	a.setProgressScale(35, 90)
 	a.emitProgress("downloading", "分析 NeoForge 支持库", 0, 0)
 	if err := a.downloadForgeLibraries(installerPath, mcDir, mcVersion); err != nil {
 		fmt.Printf("下载 NeoForge 支持库失败（将继续尝试安装）: %v\n", err)
 	}
 
-	// 3. 确保 launcher_profiles.json 存在
 	a.ensureLauncherProfiles(mcDir)
 
-	// 4. 记录当前版本文件夹列表
 	oldVersions := a.getVersionFolderList(mcDir)
 
-	// 5. 运行 bangbang93 ForgeInstaller
-	a.setProgressScale(90, 100)
 	a.emitProgress("downloading", "运行 NeoForge 安装器", 0, 0)
 
 	err := a.runForgeInstaller(installerPath, mcDir)
@@ -1617,17 +1688,15 @@ func (a *App) InstallNeoForge(mcVersion string, neoForgeVersion string) error {
 		return err
 	}
 
-	// 6. 查找安装器创建的版本文件夹
 	loaderType := "neoforge"
 	if mcVersion == "1.20.1" {
-		loaderType = "forge" // 1.20.1 的 NeoForge 版本文件夹名包含 "forge"
+		loaderType = "forge"
 	}
 	newVersionFolder := a.findNewVersionFolder(mcDir, oldVersions, mcVersion, loaderType)
 	if newVersionFolder == "" {
 		return fmt.Errorf("NeoForge 安装器运行完成但未找到版本文件夹")
 	}
 
-	// 7. 验证安装
 	if !a.validateVersionInstallation(newVersionFolder) {
 		os.RemoveAll(newVersionFolder)
 		return fmt.Errorf("NeoForge 安装验证失败：版本 JSON 无效")
@@ -1635,60 +1704,52 @@ func (a *App) InstallNeoForge(mcVersion string, neoForgeVersion string) error {
 
 	fmt.Printf("NeoForge 安装成功: %s\n", filepath.Base(newVersionFolder))
 
-	// 8. 清理安装器
 	os.Remove(installerPath)
 
 	return nil
 }
 
-// InstallOptiFine 安装 OptiFine（按照 PCL 的方式运行安装器）
 func (a *App) InstallOptiFine(mcVersion string, optifineType string, optifinePatch string) error {
+	if !isValidMCVersion(mcVersion) {
+		return fmt.Errorf("无效的 Minecraft 版本格式")
+	}
+	if !isSafeFileName(optifineType) || !isSafeFileName(optifinePatch) {
+		return fmt.Errorf("无效的 OptiFine 版本格式")
+	}
+
 	mcDir := a.GetMinecraftDir()
 
-	// 1. 下载 OptiFine jar
 	tempDir := os.Getenv("TEMP")
 	if tempDir == "" {
 		tempDir = filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Local", "Temp")
 	}
 
-	// OptiFine 阶段划分：下载 0-60%，运行安装器 60-95%，验证 95-100%
-	a.setProgressScale(0, 60)
-
 	installerPath := filepath.Join(tempDir, fmt.Sprintf("OptiFine_%s_%s_%s.jar", mcVersion, optifineType, optifinePatch))
 
 	a.emitProgress("downloading", "下载 OptiFine", 0, 0)
 
-	// BMCLAPI 镜像下载
 	downloadURL := fmt.Sprintf(
 		"https://bmclapi2.bangbang93.com/optifine/%s/%s/%s",
 		mcVersion, optifineType, optifinePatch,
 	)
 
-	// 删除旧的安装器文件
 	os.Remove(installerPath)
 
 	if err := a.downloadFile(downloadURL, installerPath, true); err != nil {
 		return fmt.Errorf("下载 OptiFine 失败: %v", err)
 	}
 
-	// 2. 选择 Java
 	javaEntry, err := a.selectJavaForInstaller()
 	if err != nil {
 		return fmt.Errorf("选择 Java 失败: %v", err)
 	}
 
-	// 3. 确保 launcher_profiles.json 存在
 	a.ensureLauncherProfiles(mcDir)
 
-	// 4. 记录当前版本文件夹列表
 	oldVersions := a.getVersionFolderList(mcDir)
 
-	// 5. 运行 OptiFine 安装器（按照 PCL 的方式）
-	a.setProgressScale(60, 95)
 	a.emitProgress("downloading", "运行 OptiFine 安装器", 0, 0)
 
-	// PCL: -Duser.home="{BaseMcFolderHome去尾斜杠}" -cp "{Target}" optifine.Installer
-	// 设置 appdata 环境变量指向 .minecraft 的父目录
 	mcDirParent := filepath.Dir(mcDir)
 
 	args := []string{}
@@ -1697,24 +1758,38 @@ func (a *App) InstallOptiFine(mcVersion string, optifineType string, optifinePat
 	}
 	args = append(args, fmt.Sprintf("-Duser.home=%s", mcDirParent), "-cp", installerPath, "optifine.Installer")
 
+	// 启动前审计 OptiFine 安装器 JVM：安装 jar 必须位于 mcDir 或其自身所在目录之内，
+	// 阻止被 mcVersion/optifineType 等清单字段间接带到 UNC / 穿越 / 目录之外的 jar。
+	ofAudit := AuditExternalJVM(ExternalJVMPlan{
+		JavaExe:      javaEntry.Path,
+		WorkDir:      mcDir,
+		Classpath:    []string{installerPath},
+		MainClass:    "optifine.Installer",
+		AllowedRoots: []string{mcDir, filepath.Dir(installerPath)},
+	})
+	if ofAudit.HasCritical() {
+		return fmt.Errorf("OptiFine 安装器启动审计未通过: %s", ofAudit.FirstCriticalCode())
+	}
+
 	cmd := exec.Command(javaEntry.Path, args...)
 	cmd.Dir = mcDir
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	// 设置 appdata 环境变量
-	cmd.Env = append(os.Environ(), fmt.Sprintf("APPDATA=%s", mcDirParent))
+	// OptiFine 安装器同样是独立 JVM：净化环境并剥离隐式 JVM 参数变量，
+	// APPDATA 仍按原需求指向 mcDir 的父目录（以 extra 覆盖方式安全注入）。
+	a.applySanitizedJVMEnv(cmd, "OptiFineInstaller", map[string]string{
+		"APPDATA": mcDirParent,
+	})
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("安装 OptiFine 失败: %v\n输出: %s", err, string(output))
 	}
 
-	// 6. 查找安装器创建的版本文件夹
 	newVersionFolder := a.findNewVersionFolder(mcDir, oldVersions, mcVersion, "optifine")
 	if newVersionFolder == "" {
 		return fmt.Errorf("OptiFine 安装器运行完成但未找到版本文件夹")
 	}
 
-	// 7. 验证安装
 	if !a.validateVersionInstallation(newVersionFolder) {
 		os.RemoveAll(newVersionFolder)
 		return fmt.Errorf("OptiFine 安装验证失败：版本 JSON 无效")
@@ -1722,7 +1797,6 @@ func (a *App) InstallOptiFine(mcVersion string, optifineType string, optifinePat
 
 	fmt.Printf("OptiFine 安装成功: %s\n", filepath.Base(newVersionFolder))
 
-	// 8. 清理安装器
 	os.Remove(installerPath)
 
 	return nil
@@ -1730,71 +1804,54 @@ func (a *App) InstallOptiFine(mcVersion string, optifineType string, optifinePat
 
 // ===== 辅助函数 =====
 
-// validateVersionInstallation 验证版本是否安装成功
 func (a *App) validateVersionInstallation(versionFolder string) bool {
-	// 检查版本文件夹是否存在
 	if _, err := os.Stat(versionFolder); os.IsNotExist(err) {
 		return false
 	}
 
-	// 检查版本 JSON 文件是否存在
 	jsonFiles, err := filepath.Glob(filepath.Join(versionFolder, "*.json"))
 	if err != nil || len(jsonFiles) == 0 {
 		return false
 	}
 
-	// 检查 JSON 文件是否有效
 	for _, jsonFile := range jsonFiles {
-		data, err := os.ReadFile(jsonFile)
-		if err != nil {
-			continue
-		}
-
 		var jsonData map[string]interface{}
-		if err := json.Unmarshal(data, &jsonData); err != nil {
+		if err := readLocalJSONBounded(jsonFile, &jsonData, 0, "版本 JSON"); err != nil {
 			continue
 		}
 
-		// 检查必要字段
 		if jsonData["id"] == nil || jsonData["mainClass"] == nil {
 			continue
 		}
 
-		// JSON 有效
 		return true
 	}
 
 	return false
 }
 
-// cleanupFailedInstallation 清理安装失败的版本
 func (a *App) cleanupFailedInstallation(mcDir string, versionID string) {
 	versionFolder := filepath.Join(mcDir, "versions", versionID)
 
-	// 删除版本文件夹
 	if _, err := os.Stat(versionFolder); err == nil {
 		os.RemoveAll(versionFolder)
 	}
 
-	// 删除临时安装器文件
 	tempDir := os.Getenv("TEMP")
 	if tempDir == "" {
 		tempDir = filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Local", "Temp")
 	}
 
-	// 清理 Forge installer
 	forgeInstaller := filepath.Join(tempDir, fmt.Sprintf("forge-%s-installer.jar", versionID))
 	if _, err := os.Stat(forgeInstaller); err == nil {
 		os.Remove(forgeInstaller)
 	}
 
-	// 清理 NeoForge installer
 	neoForgeInstaller := filepath.Join(tempDir, fmt.Sprintf("neoforge-%s-installer.jar", versionID))
 	if _, err := os.Stat(neoForgeInstaller); err == nil {
 		os.Remove(neoForgeInstaller)
 	}
 
-	// 清理 OptiFine installer
 	optifineInstaller := filepath.Join(tempDir, fmt.Sprintf("OptiFine_%s*.jar", versionID))
 	matches, _ := filepath.Glob(optifineInstaller)
 	for _, m := range matches {
@@ -1802,7 +1859,6 @@ func (a *App) cleanupFailedInstallation(mcDir string, versionID string) {
 	}
 }
 
-// CheckLoaderInstalled 检查加载器是否已安装
 func (a *App) CheckLoaderInstalled(mcVersion string, loaderName string) bool {
 	mcDir := a.GetMinecraftDir()
 	versionsDir := filepath.Join(mcDir, "versions")
@@ -1844,20 +1900,42 @@ func (a *App) CheckLoaderInstalled(mcVersion string, loaderName string) bool {
 	return false
 }
 
-// AddLoaderToDownloadList 添加加载器安装器到下载列表（已废弃，改用 game+loader 类型）
 func (a *App) AddLoaderToDownloadList(loaderName string, mcVersion string, loaderVersion string, downloadURL string) error {
+	// 三个标识全部来自前端，最终拼进下载列表展示名并参与安装分发，必须收敛：
+	// loaderName 走固定白名单（它决定后续 switch 分支），mc/loader 版本走严格名单段。
+	loaderName = strings.ToLower(strings.TrimSpace(loaderName))
+	switch loaderName {
+	case "forge", "fabric", "neoforge", "optifine":
+	default:
+		return fmt.Errorf("不支持的加载器类型: %s", loaderName)
+	}
+	safeMC, whyM := SafeVersionComponent(mcVersion)
+	if whyM != nameRejectNone {
+		return fmt.Errorf("Minecraft 版本无效: %s", describeNameReject(whyM))
+	}
+	mcVersion = safeMC
+	safeLV, whyL := SafeLoaderComponent(loaderVersion)
+	if whyL != nameRejectNone {
+		return fmt.Errorf("加载器版本无效: %s", describeNameReject(whyL))
+	}
+	loaderVersion = safeLV
 	customName := fmt.Sprintf("%s %s (%s)", loaderName, loaderVersion, mcVersion)
+	if safeName, why := SafeVersionDisplayName(customName); why != nameRejectNone {
+		return fmt.Errorf("加载器任务名称无效: %s", describeNameReject(why))
+	} else {
+		customName = safeName
+	}
+	// 下载地址来自前端，最终会"下载即运行"第三方安装器：入队时就先把非 HTTPS
+	// 链接挡掉，避免恶意 / 被劫持的明文地址进入队列后才在下载阶段暴露。
+	// 空地址交给下载阶段统一报错（个别加载器走内置安装器路径时可能不带 URL）。
+	if strings.TrimSpace(downloadURL) != "" && !isHTTPSURL(downloadURL) {
+		return fmt.Errorf("不支持的加载器下载地址（仅允许 HTTPS）")
+	}
 
 	a.downloadMutex.Lock()
 	defer a.downloadMutex.Unlock()
 
-	for _, item := range a.downloadList {
-		if item.CustomName == customName {
-			return fmt.Errorf("下载列表中已存在: %s", customName)
-		}
-	}
-
-	a.downloadList = append(a.downloadList, DownloadItem{
+	pending := DownloadItem{
 		ID:         fmt.Sprintf("loader-%s-%s", loaderName, loaderVersion),
 		URL:        downloadURL,
 		CustomName: customName,
@@ -1865,16 +1943,27 @@ func (a *App) AddLoaderToDownloadList(loaderName string, mcVersion string, loade
 		ItemType:   "loader",
 		Status:     "pending",
 		Progress:   0,
-	})
+	}
+	if why := auditDownloadItemForEnqueue(a.downloadList, pending); why != dqRejectNone {
+		return fmt.Errorf("%s", describeQueueReject(why))
+	}
+	if why := auditDownloadItemFields(pending, a.GetMinecraftDir()); why != dfRejectNone {
+		return fmt.Errorf("%s", describeDownloadFieldReject(why))
+	}
+
+	a.downloadList = append(a.downloadList, pending)
 
 	runtime.EventsEmit(a.ctx, "downloadListUpdated", a.downloadList)
 	return nil
 }
 
-// downloadLoaderItem 下载加载器安装器（已废弃）
 func (a *App) downloadLoaderItem(item *DownloadItem) error {
 	if item.URL == "" {
 		return fmt.Errorf("下载地址为空")
+	}
+
+	if !isHTTPSURL(item.URL) {
+		return fmt.Errorf("不安全的下载 URL（非 HTTPS）")
 	}
 
 	tempDir := os.Getenv("TEMP")
@@ -1882,18 +1971,16 @@ func (a *App) downloadLoaderItem(item *DownloadItem) error {
 		tempDir = filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Local", "Temp")
 	}
 
-	fileName := item.CustomName
-	if strings.HasSuffix(strings.ToLower(item.URL), ".jar") {
-		if !strings.HasSuffix(strings.ToLower(fileName), ".jar") {
-			fileName += ".jar"
-		}
-	} else if strings.HasSuffix(strings.ToLower(item.URL), ".exe") {
-		if !strings.HasSuffix(strings.ToLower(fileName), ".exe") {
-			fileName += ".exe"
-		}
+	// 落盘目标名不再直接取展示名：走 loaderdest 内核，按 URL 路径判定扩展名
+	// （忽略 query）、slug 白名单化、追加 UMFS 指纹去碰撞，并断言结果仍严格位于
+	// TEMP 内。旧实现 filepath.Base(CustomName) 保留空格 / 括号、文件名可预测，
+	// 且 URL 带 ?query 时会漏判 .jar。
+	artifactExt := loaderArtifactExt(item.URL)
+	destPath, ok := resolveLoaderTempDest(tempDir, item.CustomName, item.URL)
+	if !ok {
+		return fmt.Errorf("无法在临时目录内构造安全的安装器落盘路径")
 	}
-
-	destPath := filepath.Join(tempDir, fileName)
+	fileName := filepath.Base(destPath)
 
 	a.emitProgress("downloading", fileName, 0, 0)
 
@@ -1901,14 +1988,27 @@ func (a *App) downloadLoaderItem(item *DownloadItem) error {
 		return fmt.Errorf("下载加载器失败: %v", err)
 	}
 
-	// 如果是 JAR 安装器，自动运行
-	if strings.HasSuffix(strings.ToLower(destPath), ".jar") {
+	if artifactExt == ".jar" {
 		javaEntry := a.SearchJava()
 		if len(javaEntry) == 0 {
 			return fmt.Errorf("下载完成但未找到 Java 来运行安装器，请手动运行: %s", destPath)
 		}
+		// “下载即运行”的第三方 jar 风险最高：审计目标 jar 必须是 tempDir 内的绝对
+		// .jar，阻止 UNC / 穿越 / 目录之外目标，java 可执行同样过绝对/扩展名校验。
+		dlAudit := AuditExternalJVM(ExternalJVMPlan{
+			JavaExe:      javaEntry[0].Path,
+			WorkDir:      tempDir,
+			JarAbsPath:   destPath,
+			AllowedRoots: []string{tempDir},
+		})
+		if dlAudit.HasCritical() {
+			return fmt.Errorf("下载的安装器启动审计未通过: %s", dlAudit.FirstCriticalCode())
+		}
 		cmd := exec.Command(javaEntry[0].Path, "-jar", destPath)
 		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+		// 下载下来的第三方 jar 安装器也是独立 JVM，同样不能继承隐式 JVM
+		// 参数环境变量，否则下载即运行这条链会被 JAVA_TOOL_OPTIONS 劫持。
+		a.applySanitizedJVMEnv(cmd, "DownloadedJarInstaller", nil)
 		if err := cmd.Start(); err != nil {
 			return fmt.Errorf("启动安装器失败: %v", err)
 		}

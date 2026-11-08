@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -66,36 +65,16 @@ func (a *ProxyAuthAudit) HasWarnings() bool {
 }
 
 func (a *ProxyAuthAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return "代理转发配置未发现风险"
-	}
-	sorted := make([]ProxyAuthFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].File != sorted[j].File {
-			return sorted[i].File < sorted[j].File
-		}
-		return sorted[i].Reason < sorted[j].Reason
-	})
-	var b strings.Builder
-	for i, f := range sorted {
-		if i >= 12 {
-			b.WriteString(fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		if i > 0 {
-			b.WriteString("；")
-		}
-		b.WriteString(f.File)
-		b.WriteString(": ")
-		b.WriteString(f.Reason)
-		if f.Detail != "" {
-			b.WriteString("(")
-			b.WriteString(f.Detail)
-			b.WriteString(")")
-		}
-	}
-	return b.String()
+	return describeAuditFindings("代理转发配置未发现风险", a.Findings, 12,
+		func(f ProxyAuthFinding) []string {
+			return []string{f.File, f.Reason}
+		},
+		func(f ProxyAuthFinding) string {
+			if f.Detail == "" {
+				return f.File + ": " + f.Reason
+			}
+			return f.File + ": " + f.Reason + "(" + f.Detail + ")"
+		})
 }
 
 func spaLoadText(a *ProxyAuthAudit, root, rel string, maxBytes int64) (string, bool) {

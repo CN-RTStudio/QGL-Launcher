@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strings"
 	"time"
 )
 
@@ -64,7 +63,7 @@ func isPrivateDest(rawURL string) bool {
 	if host == "" {
 		return true
 	}
-	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+	if isLoopbackHostName(host) {
 		return true
 	}
 	// 用更宽的 IP 字面量解析器，连十六进制/八进制/扁平整数/IPv4-mapped

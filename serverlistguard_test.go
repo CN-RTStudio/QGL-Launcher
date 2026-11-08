@@ -161,3 +161,15 @@ func TestClassifyServerHostObfuscated(t *testing.T) {
 		}
 	}
 }
+
+func TestParseServerAddressLoopbackNames(t *testing.T) {
+	for _, host := range []string{"localhost", "LOCALHOST", "localhost.", "foo.localhost", "ip6-localhost"} {
+		entry, err := ParseServerAddress(host+":25565", ServerListLimits{})
+		if err != nil {
+			t.Fatalf("ParseServerAddress(%q) 解析失败: %v", host, err)
+		}
+		if entry.Kind != ServerKindLoopback {
+			t.Fatalf("ParseServerAddress(%q) 分类 = %v, want loopback", host, entry.Kind)
+		}
+	}
+}

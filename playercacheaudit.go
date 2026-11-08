@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 )
@@ -49,12 +48,7 @@ type PlayerCacheAudit struct {
 }
 
 func (audit PlayerCacheAudit) Blocking() bool {
-	for _, finding := range audit.Findings {
-		if finding.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(audit.Findings, func(f PlayerCacheFinding) bool { return f.Blocking })
 }
 
 func (audit PlayerCacheAudit) HasWarnings() bool {
@@ -62,16 +56,7 @@ func (audit PlayerCacheAudit) HasWarnings() bool {
 }
 
 func (audit PlayerCacheAudit) Codes() []string {
-	seen := map[string]bool{}
-	codes := []string{}
-	for _, finding := range audit.Findings {
-		if !seen[finding.Reason] {
-			seen[finding.Reason] = true
-			codes = append(codes, finding.Reason)
-		}
-	}
-	sort.Strings(codes)
-	return codes
+	return findingCodes(audit.Findings, func(f PlayerCacheFinding) string { return f.Reason })
 }
 
 func (audit PlayerCacheAudit) Describe() string {

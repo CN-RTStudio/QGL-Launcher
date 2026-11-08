@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -57,34 +56,16 @@ func (a *WhitelistCoverageAudit) HasWarnings() bool {
 }
 
 func (a *WhitelistCoverageAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return "白名单覆盖检查通过"
-	}
-	sorted := make([]WhitelistCoverageFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Reason != sorted[j].Reason {
-			return sorted[i].Reason < sorted[j].Reason
-		}
-		return sorted[i].Detail < sorted[j].Detail
-	})
-	var b strings.Builder
-	for i, f := range sorted {
-		if i >= 12 {
-			b.WriteString(fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		if i > 0 {
-			b.WriteString("；")
-		}
-		b.WriteString(f.Reason)
-		if f.Detail != "" {
-			b.WriteString("(")
-			b.WriteString(f.Detail)
-			b.WriteString(")")
-		}
-	}
-	return b.String()
+	return describeAuditFindings("白名单覆盖检查通过", a.Findings, 12,
+		func(f WhitelistCoverageFinding) []string {
+			return []string{f.Reason, f.Detail}
+		},
+		func(f WhitelistCoverageFinding) string {
+			if f.Detail == "" {
+				return f.Reason
+			}
+			return f.Reason + "(" + f.Detail + ")"
+		})
 }
 
 type swcEntry struct {

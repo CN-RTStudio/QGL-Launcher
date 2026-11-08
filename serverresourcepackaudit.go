@@ -10,23 +10,23 @@ import (
 )
 
 const (
-	packReasonOK            = "ok"
-	packReasonMissing       = "missing"
-	packReasonSymlink       = "symlink"
-	packReasonUnreadable    = "unreadable"
-	packReasonTooLarge      = "too-large"
-	packReasonBadScheme     = "bad-scheme"
-	packReasonInsecure      = "insecure-transport"
-	packReasonUserinfo      = "url-userinfo"
-	packReasonTooLong       = "url-too-long"
-	packReasonBadHash       = "bad-hash"
-	packReasonMissingHash   = "missing-hash"
-	packReasonPlaceholder   = "placeholder-hash"
-	packReasonBadPrompt     = "bad-prompt"
-	packReasonDuplicateKey  = "duplicate-key"
-	packMaxURLLength        = 2048
-	packMaxPromptRunes      = 256
-	packSHA1HexLength       = 40
+	packReasonOK           = "ok"
+	packReasonMissing      = "missing"
+	packReasonSymlink      = "symlink"
+	packReasonUnreadable   = "unreadable"
+	packReasonTooLarge     = "too-large"
+	packReasonBadScheme    = "bad-scheme"
+	packReasonInsecure     = "insecure-transport"
+	packReasonUserinfo     = "url-userinfo"
+	packReasonTooLong      = "url-too-long"
+	packReasonBadHash      = "bad-hash"
+	packReasonMissingHash  = "missing-hash"
+	packReasonPlaceholder  = "placeholder-hash"
+	packReasonBadPrompt    = "bad-prompt"
+	packReasonDuplicateKey = "duplicate-key"
+	packMaxURLLength       = 2048
+	packMaxPromptRunes     = 256
+	packSHA1HexLength      = 40
 )
 
 type PackFinding struct {
@@ -48,12 +48,7 @@ func (a *ServerResourcePackAudit) Blocking() bool {
 	if a == nil {
 		return false
 	}
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f PackFinding) bool { return f.Blocking })
 }
 
 func (a *ServerResourcePackAudit) HasWarnings() bool {
@@ -133,8 +128,8 @@ func AuditServerResourcePack(serverDir string) (*ServerResourcePackAudit, error)
 	}
 	if info.Size() > int64(localTextConfigMaxBytes) {
 		audit.Findings = append(audit.Findings, PackFinding{
-			Reason: packReasonTooLarge,
-			Detail: fmt.Sprintf("server.properties 大小 %d 字节，超过 %d 上限", info.Size(), localTextConfigMaxBytes),
+			Reason:   packReasonTooLarge,
+			Detail:   fmt.Sprintf("server.properties 大小 %d 字节，超过 %d 上限", info.Size(), localTextConfigMaxBytes),
 			Blocking: true,
 		})
 		return audit, nil

@@ -47,12 +47,7 @@ func (a *ServerBindingAudit) Blocking() bool {
 	if a == nil {
 		return false
 	}
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f BindingFinding) bool { return f.Blocking })
 }
 
 func (a *ServerBindingAudit) HasWarnings() bool {

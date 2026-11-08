@@ -152,3 +152,94 @@ func TestWriteServerListStoreCapsEntries(t *testing.T) {
 		t.Fatalf("entry cap not enforced: %d", len(store.Entries))
 	}
 }
+
+func TestServerListStoreRejectsSymlinkEscape(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "QGL")
+	if err := os.MkdirAll(filepath.Join(root, "QGL"), 0o700); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	outside := filepath.Join(base, "outside")
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	storePath := filepath.Join(root, "QGL", "servers.json")
+	outsideFile := filepath.Join(outside, "servers.json")
+	if err := os.WriteFile(outsideFile, []byte(`{"version":1,"entries":[]}`), 0o600); err != nil {
+		t.Fatalf("seed outside store: %v", err)
+	}
+	if err := os.Symlink(outsideFile, storePath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	if _, err := ReadServerListStore(storePath, root); err == nil {
+		t.Fatalf("symlinked server list store outside root was read")
+	}
+	if err := WriteServerListStore(storePath, root, nil, time.Now()); err == nil {
+		t.Fatalf("symlinked server list store outside root was written")
+	}
+	if info, statErr := os.Lstat(outsideFile); statErr != nil {
+		t.Fatalf("outside store disappeared: %v", statErr)
+	} else if info.Size() != int64(len(`{"version":1,"entries":[]}`)) {
+		t.Fatalf("outside store was modified, size=%d", info.Size())
+	}
+}
+
+func TestServerListStoreAcceptsRegularPath(t *testing.T) {
+	root := serverListTestRoot(t)
+	storePath := serverListStorePath(root)
+	previousWD, wdErr := os.Getwd()
+	if wdErr != nil {
+		t.Fatalf("getwd: %v", wdErr)
+	}
+	scratch := t.TempDir()
+	if chdirErr := os.Chdir(scratch); chdirErr != nil {
+		t.Fatalf("chdir: %v", chdirErr)
+	}
+	defer func() {
+		if restoreErr := os.Chdir(previousWD); restoreErr != nil {
+			t.Fatalf("restore cwd: %v", restoreErr)
+		}
+	}()
+	if err := WriteServerListStore(storePath, root, nil, time.Now()); err != nil {
+		t.Fatalf("write regular store: %v", err)
+	}
+	if _, statErr := os.Stat(storePath); statErr != nil {
+		t.Fatalf("store not written under root: %v", statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(scratch, "QGL", "servers.json")); statErr == nil {
+		t.Fatalf("store written relative to process cwd")
+	}
+	store, err := ReadServerListStore(storePath, root)
+	if err != nil {
+		t.Fatalf("read regular store: %v", err)
+	}
+	if store.Version != serverListStoreVersion {
+		t.Fatalf("store version = %d, want %d", store.Version, serverListStoreVersion)
+	}
+}
+
+func TestServerListStoreRejectsSymlinkDirectory(t *testing.T) {
+	base := t.TempDir()
+	root := filepath.Join(base, "QGL")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir root: %v", err)
+	}
+	outside := filepath.Join(base, "outside")
+	if err := os.MkdirAll(outside, 0o700); err != nil {
+		t.Fatalf("mkdir outside: %v", err)
+	}
+	inner := filepath.Join(root, "QGL")
+	if err := os.Symlink(outside, inner); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	storePath := filepath.Join(inner, "servers.json")
+	if _, err := ReadServerListStore(storePath, root); err == nil {
+		t.Fatalf("server list store under symlinked directory was read")
+	}
+	if err := WriteServerListStore(storePath, root, nil, time.Now()); err == nil {
+		t.Fatalf("server list store under symlinked directory was written")
+	}
+	if _, statErr := os.Lstat(filepath.Join(outside, "servers.json")); statErr == nil {
+		t.Fatalf("store file created outside root via symlinked directory")
+	}
+}

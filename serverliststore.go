@@ -203,11 +203,14 @@ func auditServerListStorePath(path string, root string) (string, error) {
 	if strings.TrimSpace(path) == "" {
 		return "", errors.New("server list store path is empty")
 	}
-	within, ok := PathWithin(root, path)
-	if !ok {
+	if _, ok := PathWithin(root, path); !ok {
 		return "", errors.New("server list store path escapes the qgl directory")
 	}
-	return within, nil
+	absolutePath, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve server list store path: %w", err)
+	}
+	return absolutePath, nil
 }
 
 func ReadServerListStore(path string, root string) (ServerListStore, error) {

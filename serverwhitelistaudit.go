@@ -191,7 +191,7 @@ func wlLoadEntries(path string) ([]wlEntry, string) {
 	if info.Size() > wlMaxFileBytes {
 		return nil, wlReasonTooLarge
 	}
-	data, err := os.ReadFile(path)
+	data, err := readBoundedFile(path, auditTextReadMaxBytes)
 	if err != nil {
 		return nil, wlReasonUnreadable
 	}
@@ -203,7 +203,7 @@ func wlLoadEntries(path string) ([]wlEntry, string) {
 }
 
 func wlLoadRawShape(path string) bool {
-	data, err := os.ReadFile(path)
+	data, err := readBoundedFile(path, auditTextReadMaxBytes)
 	if err != nil {
 		return true
 	}

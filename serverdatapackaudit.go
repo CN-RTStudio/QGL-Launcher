@@ -286,7 +286,7 @@ func AuditServerDataPacks(serverDir string) DataPackAudit {
 				name := filepath.Join(root, entry.Name())
 				audit.Packs = append(audit.Packs, name)
 				metaPath := filepath.Join(dir, entry.Name(), "pack.mcmeta")
-				data, err := os.ReadFile(metaPath)
+				data, err := readBoundedFile(metaPath, auditTextReadMaxBytes)
 				if err != nil {
 					audit.add(name, dpReasonMissingMcmeta, "目录数据包缺少 pack.mcmeta", false)
 					continue

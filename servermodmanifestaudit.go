@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -49,12 +48,7 @@ type ModManifestAudit struct {
 }
 
 func (audit ModManifestAudit) Blocking() bool {
-	for _, finding := range audit.Findings {
-		if finding.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(audit.Findings, func(f ModManifestFinding) bool { return f.Blocking })
 }
 
 func (audit ModManifestAudit) HasWarnings() bool {
@@ -62,16 +56,7 @@ func (audit ModManifestAudit) HasWarnings() bool {
 }
 
 func (audit ModManifestAudit) Codes() []string {
-	seen := map[string]bool{}
-	codes := []string{}
-	for _, finding := range audit.Findings {
-		if !seen[finding.Reason] {
-			seen[finding.Reason] = true
-			codes = append(codes, finding.Reason)
-		}
-	}
-	sort.Strings(codes)
-	return codes
+	return findingCodes(audit.Findings, func(f ModManifestFinding) string { return f.Reason })
 }
 
 func (audit ModManifestAudit) Describe() string {

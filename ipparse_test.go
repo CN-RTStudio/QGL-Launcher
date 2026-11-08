@@ -279,3 +279,18 @@ func TestIsNonPublicIPTransitionPrefix(t *testing.T) {
 		}
 	}
 }
+
+func TestIsLoopbackHostName(t *testing.T) {
+	loop := []string{"localhost", "LOCALHOST", "localhost.", "foo.localhost", "ip6-localhost", " LocalHost. "}
+	for _, h := range loop {
+		if !isLoopbackHostName(h) {
+			t.Fatalf("isLoopbackHostName(%q) 应为 true", h)
+		}
+	}
+	plain := []string{"", "example.com", "localhosts", "notlocalhost", "localhost.example.com", "a.localhost.evil"}
+	for _, h := range plain {
+		if isLoopbackHostName(h) {
+			t.Fatalf("isLoopbackHostName(%q) 应为 false", h)
+		}
+	}
+}

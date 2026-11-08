@@ -48,16 +48,11 @@ func (a *MotdControlAudit) add(reason, detail string, blocking bool) {
 }
 
 func (a *MotdControlAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f MotdControlFinding) bool { return f.Blocking })
 }
 
 func (a *MotdControlAudit) HasWarnings() bool {
-	return len(a.Findings) > 0
+	return hasAny(a.Findings)
 }
 
 func (a *MotdControlAudit) Describe() string {

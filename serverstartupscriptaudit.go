@@ -61,12 +61,7 @@ func (a *ServerStartupAudit) Blocking() bool {
 }
 
 func (a *ServerStartupAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != startupReasonOK && f.Reason != startupReasonMissing {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f StartupFinding) bool { return !f.Blocking && f.Reason != startupReasonOK && f.Reason != startupReasonMissing })
 }
 
 func (a *ServerStartupAudit) Codes() []string {

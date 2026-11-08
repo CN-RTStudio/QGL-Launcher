@@ -50,26 +50,11 @@ func (a BackupAudit) Blocking() bool {
 }
 
 func (a BackupAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != bkReasonOK {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f BackupFinding) bool { return !f.Blocking && f.Reason != bkReasonOK })
 }
 
 func (a BackupAudit) Codes() []string {
-	seen := map[string]bool{}
-	codes := []string{}
-	for _, f := range a.Findings {
-		if f.Reason == bkReasonOK || seen[f.Reason] {
-			continue
-		}
-		seen[f.Reason] = true
-		codes = append(codes, f.Reason)
-	}
-	sort.Strings(codes)
-	return codes
+	return findingCodesSkip(a.Findings, bkReasonOK, func(f BackupFinding) string { return f.Reason })
 }
 
 func (a BackupAudit) Describe() string {

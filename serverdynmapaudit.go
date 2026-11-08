@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -63,36 +62,16 @@ func (a *DynmapAudit) HasWarnings() bool {
 }
 
 func (a *DynmapAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return "网页地图配置未发现风险"
-	}
-	sorted := make([]DynmapFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].File != sorted[j].File {
-			return sorted[i].File < sorted[j].File
-		}
-		return sorted[i].Reason < sorted[j].Reason
-	})
-	var b strings.Builder
-	for i, f := range sorted {
-		if i >= 12 {
-			b.WriteString(fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		if i > 0 {
-			b.WriteString("；")
-		}
-		b.WriteString(f.File)
-		b.WriteString(": ")
-		b.WriteString(f.Reason)
-		if f.Detail != "" {
-			b.WriteString("(")
-			b.WriteString(f.Detail)
-			b.WriteString(")")
-		}
-	}
-	return b.String()
+	return describeAuditFindings("网页地图配置未发现风险", a.Findings, 12,
+		func(f DynmapFinding) []string {
+			return []string{f.File, f.Reason}
+		},
+		func(f DynmapFinding) string {
+			if f.Detail == "" {
+				return f.File + ": " + f.Reason
+			}
+			return f.File + ": " + f.Reason + "(" + f.Detail + ")"
+		})
 }
 
 func spdLoadText(a *DynmapAudit, root, rel string, maxBytes int64) (string, bool) {
@@ -164,7 +143,7 @@ func AuditServerDynmap(serverDir string) *DynmapAudit {
 	if !ok {
 		return a
 	}
-	props := pxParseProperties(text)
+	props := cfgFlattenYAML(text)
 	if len(props) == 0 {
 		a.add("plugins/dynmap/configuration.txt", spdReasonBadValue, "配置为空或格式不可识别", false)
 		return a

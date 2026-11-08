@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -49,26 +48,11 @@ func (a DataPackAudit) Blocking() bool {
 }
 
 func (a DataPackAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != dpReasonOK {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f DataPackFinding) bool { return !f.Blocking && f.Reason != dpReasonOK })
 }
 
 func (a DataPackAudit) Codes() []string {
-	seen := map[string]bool{}
-	codes := []string{}
-	for _, f := range a.Findings {
-		if f.Reason == dpReasonOK || seen[f.Reason] {
-			continue
-		}
-		seen[f.Reason] = true
-		codes = append(codes, f.Reason)
-	}
-	sort.Strings(codes)
-	return codes
+	return findingCodesSkip(a.Findings, dpReasonOK, func(f DataPackFinding) string { return f.Reason })
 }
 
 func (a DataPackAudit) Describe() string {

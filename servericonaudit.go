@@ -43,16 +43,11 @@ func (a *IconFileAudit) add(file, reason, detail string, blocking bool) {
 }
 
 func (a *IconFileAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f IconFileFinding) bool { return f.Blocking })
 }
 
 func (a *IconFileAudit) HasWarnings() bool {
-	return len(a.Findings) > 0
+	return hasAny(a.Findings)
 }
 
 func (a *IconFileAudit) Describe() string {

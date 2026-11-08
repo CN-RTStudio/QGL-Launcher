@@ -68,15 +68,7 @@ func (a *PaperAudit) Describe() string {
 }
 
 func pacHasControlChars(text string) bool {
-	for _, r := range text {
-		if r == '\t' || r == '\n' || r == '\r' {
-			continue
-		}
-		if r < 0x20 || r == 0x7f {
-			return true
-		}
-	}
-	return false
+	return hasControlCharsText(text)
 }
 
 func pacParseBool(value string) bool {

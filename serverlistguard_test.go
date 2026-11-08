@@ -223,3 +223,55 @@ func TestParseServerAddressIPv6Forms(t *testing.T) {
 		}
 	}
 }
+
+func TestParseServerAddressRejectsFormatRunes(t *testing.T) {
+	invalid := []string{
+		"evil\u0085.example.com",
+		"evil\u009b.example.com",
+		"evil\u202e.example.com",
+		"evil\u2066.example.com",
+		"evil\u200b.example.com",
+		"evil\ufeff.example.com",
+	}
+	for _, raw := range invalid {
+		if _, err := ParseServerAddress(raw, ServerListLimits{}); err == nil {
+			t.Fatalf("address with format rune %q accepted", raw)
+		}
+	}
+}
+
+func TestSanitizeServerNameStripsFormatRunes(t *testing.T) {
+	cases := map[string]string{
+		"Hypixel\u202eevil":   "Hypixelevil",
+		"a\u200bb":            "ab",
+		"a\u0085b":            "ab",
+		"a\u2066b\u2069":      "ab",
+		"Hypixel archive 001": "Hypixel archive 001",
+	}
+	for in, want := range cases {
+		if got := SanitizeServerName(in, ServerListLimits{}); got != want {
+			t.Fatalf("SanitizeServerName(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestParseServerAddressRejectsStrayColonAndSignedPort(t *testing.T) {
+	invalid := []string{
+		"evil.com:80:90",
+		"a:b:c",
+		"host:25565:25565",
+		"host:+25565",
+		"[::1]:+25565",
+	}
+	for _, raw := range invalid {
+		if _, err := ParseServerAddress(raw, ServerListLimits{}); err == nil {
+			t.Fatalf("invalid %q accepted", raw)
+		}
+	}
+	valid := []string{"::1", "fe80::1", "[fe80::1]:25565", "host:025565"}
+	for _, raw := range valid {
+		if _, err := ParseServerAddress(raw, ServerListLimits{}); err != nil {
+			t.Fatalf("valid %q rejected: %v", raw, err)
+		}
+	}
+}

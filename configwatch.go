@@ -14,7 +14,6 @@ package main
 
 import (
 	"encoding/json"
-	"os"
 	"strings"
 )
 
@@ -89,7 +88,7 @@ func loadFingerprintRecord(path string, lim WatchLimits) (fingerprintRecord, err
 	if lim.MaxRecordBytes == 0 {
 		lim = defaultWatchLimits()
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := readBoundedFile(path, auditTextReadMaxBytes)
 	if err != nil {
 		return fingerprintRecord{}, err
 	}

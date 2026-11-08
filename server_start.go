@@ -125,6 +125,11 @@ func (a *App) resolveServerJarDownload(version string) (string, string, error) {
 		return "", "", fmt.Errorf("版本清单 URL 必须使用 HTTPS")
 	}
 	versionURL = rewriteMetaIndexURLToBMCL(versionURL)
+	if !urlOnTrustedHost(versionURL, allowedVersionMetaHosts) {
+		recordSecurityEvent(auditCategoryExternalURL, auditSeverityCritical, auditActionBlocked,
+			"server-version-manifest", "版本清单地址不在可信元数据主机白名单内")
+		return "", "", fmt.Errorf("版本清单地址不在可信元数据主机白名单内")
+	}
 
 	// 版本 JSON 很小，限制 8MB 足够
 	resp, err := safeGet(httpClient, versionURL, 8<<20)

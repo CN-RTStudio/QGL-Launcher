@@ -42,16 +42,11 @@ func (a *EulaAudit) add(file, reason, detail string, blocking bool) {
 }
 
 func (a *EulaAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f EulaFinding) bool { return f.Blocking })
 }
 
 func (a *EulaAudit) HasWarnings() bool {
-	return len(a.Findings) > 0
+	return hasAny(a.Findings)
 }
 
 func (a *EulaAudit) Describe() string {

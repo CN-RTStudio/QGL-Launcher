@@ -57,12 +57,7 @@ type JMXAudit struct {
 }
 
 func (a JMXAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f JMXFinding) bool { return f.Blocking })
 }
 
 func (a JMXAudit) HasWarnings() bool {

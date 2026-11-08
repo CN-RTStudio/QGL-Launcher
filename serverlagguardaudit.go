@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -56,34 +55,16 @@ func (a *LagGuardAudit) HasWarnings() bool {
 }
 
 func (a *LagGuardAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return "视距与区块写入参数未发现资源耗尽风险"
-	}
-	sorted := make([]LagGuardFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Reason != sorted[j].Reason {
-			return sorted[i].Reason < sorted[j].Reason
-		}
-		return sorted[i].Detail < sorted[j].Detail
-	})
-	var b strings.Builder
-	for i, f := range sorted {
-		if i >= 10 {
-			b.WriteString(fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		if i > 0 {
-			b.WriteString("；")
-		}
-		b.WriteString(f.Reason)
-		if f.Detail != "" {
-			b.WriteString("(")
-			b.WriteString(f.Detail)
-			b.WriteString(")")
-		}
-	}
-	return b.String()
+	return describeAuditFindings("视距与区块写入参数未发现资源耗尽风险", a.Findings, 10,
+		func(f LagGuardFinding) []string {
+			return []string{f.Reason, f.Detail}
+		},
+		func(f LagGuardFinding) string {
+			if f.Detail == "" {
+				return f.Reason
+			}
+			return f.Reason + "(" + f.Detail + ")"
+		})
 }
 
 func slgReadProps(serverDir string, a *LagGuardAudit) (map[string]string, bool) {

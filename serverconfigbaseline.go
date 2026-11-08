@@ -206,7 +206,7 @@ func readBaselineStore(path string) (*baselineStore, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Size() > baselineMaxBytes {
 		return nil, fmt.Errorf("基线文件不是可信普通文件")
 	}
-	data, err := os.ReadFile(path)
+	data, err := readBoundedFile(path, auditTextReadMaxBytes)
 	if err != nil {
 		return nil, err
 	}

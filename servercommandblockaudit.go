@@ -53,12 +53,7 @@ func (a *CommandBlockAudit) add(file, reason, detail string, blocking bool) {
 }
 
 func (a *CommandBlockAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f CommandBlockFinding) bool { return f.Blocking })
 }
 
 func (a *CommandBlockAudit) HasWarnings() bool {
@@ -71,15 +66,7 @@ func (a *CommandBlockAudit) HasWarnings() bool {
 }
 
 func (a *CommandBlockAudit) Describe() string {
-	items := make([]string, 0, len(a.Findings))
-	for _, f := range a.Findings {
-		items = append(items, fmt.Sprintf("%s:%s:%s", f.File, f.Reason, f.Detail))
-	}
-	sort.Strings(items)
-	if len(items) > 12 {
-		items = append(items[:12], fmt.Sprintf("...共%d项", len(a.Findings)))
-	}
-	return strings.Join(items, "; ")
+	return describeFindings(a.Findings, func(f CommandBlockFinding) string { return fmt.Sprintf("%s:%s:%s", f.File, f.Reason, f.Detail) }, 12)
 }
 
 func scbLoadText(a *CommandBlockAudit, root, rel string, maxBytes int64) (string, bool) {

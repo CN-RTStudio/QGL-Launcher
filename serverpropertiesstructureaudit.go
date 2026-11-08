@@ -46,16 +46,11 @@ func (a *PropDupAudit) add(reason, detail string, blocking bool) {
 }
 
 func (a *PropDupAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f PropDupFinding) bool { return f.Blocking })
 }
 
 func (a *PropDupAudit) HasWarnings() bool {
-	return len(a.Findings) > 0
+	return hasAny(a.Findings)
 }
 
 func (a *PropDupAudit) Describe() string {

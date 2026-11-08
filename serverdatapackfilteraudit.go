@@ -58,12 +58,7 @@ func (a PackFilterAudit) Blocking() bool {
 }
 
 func (a PackFilterAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != pfReasonOK {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f PackFilterFinding) bool { return !f.Blocking && f.Reason != pfReasonOK })
 }
 
 func (a PackFilterAudit) Describe() string {

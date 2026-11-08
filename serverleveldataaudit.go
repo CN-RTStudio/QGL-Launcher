@@ -116,7 +116,7 @@ func AuditServerLevelData(serverDir string) *LevelDataAudit {
 		a.add(rel, sldReasonLarge, fmt.Sprintf("文件 %d 字节", info.Size()), true)
 		return a
 	}
-	data, err := os.ReadFile(path)
+	data, err := readBoundedFile(path, auditTextReadMaxBytes)
 	if err != nil {
 		a.add(rel, sldReasonRead, err.Error(), true)
 		return a

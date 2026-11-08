@@ -50,12 +50,7 @@ type PluginPermissionAudit struct {
 }
 
 func (a PluginPermissionAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f PluginPermFinding) bool { return f.Blocking })
 }
 
 func (a PluginPermissionAudit) HasWarnings() bool {

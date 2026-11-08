@@ -43,12 +43,7 @@ type LibraryAudit struct {
 }
 
 func (a LibraryAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f LibraryFinding) bool { return f.Blocking })
 }
 
 func (a LibraryAudit) HasWarnings() bool {

@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -46,26 +45,11 @@ func (a LibraryAudit) Blocking() bool {
 }
 
 func (a LibraryAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != libReasonOK {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f LibraryFinding) bool { return !f.Blocking && f.Reason != libReasonOK })
 }
 
 func (a LibraryAudit) Codes() []string {
-	seen := map[string]bool{}
-	codes := []string{}
-	for _, f := range a.Findings {
-		if f.Reason == libReasonOK || seen[f.Reason] {
-			continue
-		}
-		seen[f.Reason] = true
-		codes = append(codes, f.Reason)
-	}
-	sort.Strings(codes)
-	return codes
+	return findingCodesSkip(a.Findings, libReasonOK, func(f LibraryFinding) string { return f.Reason })
 }
 
 func (a LibraryAudit) Describe() string {

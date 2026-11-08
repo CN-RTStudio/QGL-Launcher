@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 )
 
@@ -42,12 +41,7 @@ func (a *PluginUpdateAudit) add(file, reason, detail string, blocking bool) {
 }
 
 func (a *PluginUpdateAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f PluginUpdateFinding) bool { return f.Blocking })
 }
 
 func (a *PluginUpdateAudit) HasWarnings() bool {
@@ -60,15 +54,7 @@ func (a *PluginUpdateAudit) HasWarnings() bool {
 }
 
 func (a *PluginUpdateAudit) Describe() string {
-	items := make([]string, 0, len(a.Findings))
-	for _, f := range a.Findings {
-		items = append(items, fmt.Sprintf("%s:%s:%s", f.File, f.Reason, f.Detail))
-	}
-	sort.Strings(items)
-	if len(items) > 12 {
-		items = append(items[:12], fmt.Sprintf("...共%d项", len(a.Findings)))
-	}
-	return strings.Join(items, "; ")
+	return describeFindings(a.Findings, func(f PluginUpdateFinding) string { return fmt.Sprintf("%s:%s:%s", f.File, f.Reason, f.Detail) }, 12)
 }
 
 func spuAutoUpdateKeys(flat map[string]string) []string {

@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 )
@@ -77,39 +76,16 @@ func (a *BanAudit) HasWarnings() bool {
 }
 
 func (a *BanAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return "封禁名单配置处于安全区间"
-	}
-	sorted := make([]BanAuditFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].File != sorted[j].File {
-			return sorted[i].File < sorted[j].File
-		}
-		if sorted[i].Reason != sorted[j].Reason {
-			return sorted[i].Reason < sorted[j].Reason
-		}
-		return sorted[i].Detail < sorted[j].Detail
-	})
-	var b strings.Builder
-	for i, f := range sorted {
-		if i >= 10 {
-			b.WriteString(fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		if i > 0 {
-			b.WriteString("；")
-		}
-		b.WriteString(f.File)
-		b.WriteString("/")
-		b.WriteString(f.Reason)
-		if f.Detail != "" {
-			b.WriteString("(")
-			b.WriteString(f.Detail)
-			b.WriteString(")")
-		}
-	}
-	return b.String()
+	return describeAuditFindings("封禁名单配置处于安全区间", a.Findings, 10,
+		func(f BanAuditFinding) []string {
+			return []string{f.File, f.Reason, f.Detail}
+		},
+		func(f BanAuditFinding) string {
+			if f.Detail == "" {
+				return f.File + "/" + f.Reason
+			}
+			return f.File + "/" + f.Reason + "(" + f.Detail + ")"
+		})
 }
 
 func bxaLoad(serverDir, name string, a *BanAudit) ([]bxaEntry, bool) {

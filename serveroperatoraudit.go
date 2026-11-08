@@ -125,7 +125,7 @@ func AuditServerOperators(serverDir string) (*ServerOperatorAudit, error) {
 			})
 			continue
 		}
-		data, err := os.ReadFile(path)
+		data, err := readBoundedFile(path, auditTextReadMaxBytes)
 		if err != nil {
 			audit.Findings = append(audit.Findings, OperatorFinding{
 				File: name, Reason: operatorReasonUnreadable, Detail: "无法读取文件", Blocking: false,

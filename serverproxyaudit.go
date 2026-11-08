@@ -53,12 +53,7 @@ type ServerProxyAudit struct {
 }
 
 func (a *ServerProxyAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f ProxyFinding) bool { return f.Blocking })
 }
 
 func (a *ServerProxyAudit) HasWarnings() bool {

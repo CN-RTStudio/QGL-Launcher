@@ -215,7 +215,7 @@ func AuditServerBanList(serverDir string) BanListAudit {
 			audit.add(name, banReasonTooLarge, "封禁名单过大", true)
 			continue
 		}
-		data, err := os.ReadFile(path)
+		data, err := readBoundedFile(path, auditTextReadMaxBytes)
 		if err != nil {
 			audit.add(name, banReasonUnreadable, "封禁名单不可读", true)
 			continue

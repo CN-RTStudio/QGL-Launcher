@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -58,34 +57,16 @@ func (a *PrivilegeScopeAudit) HasWarnings() bool {
 }
 
 func (a *PrivilegeScopeAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return "管理员权限与白名单策略处于安全区间"
-	}
-	sorted := make([]PrivilegeScopeFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Reason != sorted[j].Reason {
-			return sorted[i].Reason < sorted[j].Reason
-		}
-		return sorted[i].Detail < sorted[j].Detail
-	})
-	var b strings.Builder
-	for i, f := range sorted {
-		if i >= 10 {
-			b.WriteString(fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		if i > 0 {
-			b.WriteString("；")
-		}
-		b.WriteString(f.Reason)
-		if f.Detail != "" {
-			b.WriteString("(")
-			b.WriteString(f.Detail)
-			b.WriteString(")")
-		}
-	}
-	return b.String()
+	return describeAuditFindings("管理员权限与白名单策略处于安全区间", a.Findings, 10,
+		func(f PrivilegeScopeFinding) []string {
+			return []string{f.Reason, f.Detail}
+		},
+		func(f PrivilegeScopeFinding) string {
+			if f.Detail == "" {
+				return f.Reason
+			}
+			return f.Reason + "(" + f.Detail + ")"
+		})
 }
 
 func spvReadProps(serverDir string, a *PrivilegeScopeAudit) (map[string]string, bool) {

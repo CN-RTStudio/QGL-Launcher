@@ -77,6 +77,9 @@ func TestParseHostPortInvalid(t *testing.T) {
 		"bad-.example.com:22":           addrRejectHostname,
 		"exa mple.com:22":               addrRejectControl,
 		"127.0.0.1:22 ":                 addrRejectControl,
+		"mc.example.com:025565":         addrRejectBadPort,
+		"127.0.0.1:0080":                addrRejectBadPort,
+		"127.0.0.1:+80":                 addrRejectBadPort,
 	}
 	for in, wantWhy := range cases {
 		got, why := ValidateHostPort(in)

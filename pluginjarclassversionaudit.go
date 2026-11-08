@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -65,26 +64,13 @@ func (a *PjvAudit) HasWarnings() bool {
 }
 
 func (a *PjvAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return fmt.Sprintf("插件字节码版本正常，%d 个 jar，%d 个 class，最高 major %d", a.Jars, a.Classes, a.MaxMajor)
-	}
-	sorted := make([]PjvFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Reason != sorted[j].Reason {
-			return sorted[i].Reason < sorted[j].Reason
-		}
-		return sorted[i].Entry < sorted[j].Entry
-	})
-	parts := make([]string, 0, len(sorted))
-	for i, f := range sorted {
-		if i >= 8 {
-			parts = append(parts, fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		parts = append(parts, f.Reason)
-	}
-	return strings.Join(parts, "；")
+	return describeAuditFindings(fmt.Sprintf("插件字节码版本正常，%d 个 jar，%d 个 class，最高 major %d", a.Jars, a.Classes, a.MaxMajor), a.Findings, 8,
+		func(f PjvFinding) []string {
+			return []string{f.Reason, f.Entry}
+		},
+		func(f PjvFinding) string {
+			return f.Reason
+		})
 }
 
 func pjvClassHeader(name string) bool {

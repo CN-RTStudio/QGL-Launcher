@@ -42,16 +42,11 @@ func (a *OnlineModeAudit) add(reason, detail string, blocking bool) {
 }
 
 func (a *OnlineModeAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f OnlineModeFinding) bool { return f.Blocking })
 }
 
 func (a *OnlineModeAudit) HasWarnings() bool {
-	return len(a.Findings) > 0
+	return hasAny(a.Findings)
 }
 
 func (a *OnlineModeAudit) Describe() string {

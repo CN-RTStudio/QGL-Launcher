@@ -513,7 +513,7 @@ func readWorldBackupMeta(dir, worldName, stamp string) (*WorldBackupMeta, string
 		return nil, "", worldError("拒绝读取链接形式的备份文件")
 	}
 	const maxManifestBytes = int64(1) << 20
-	raw, err := os.ReadFile(metaPath)
+	raw, err := readBoundedFile(metaPath, auditTextReadMaxBytes)
 	if err != nil {
 		return nil, "", worldError("备份清单不存在或不可读")
 	}

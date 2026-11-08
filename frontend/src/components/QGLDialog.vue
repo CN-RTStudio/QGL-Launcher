@@ -108,7 +108,7 @@ defineExpose({ show })
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0, 0, 0, 0.45);
+  background: var(--overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -118,7 +118,7 @@ defineExpose({ show })
 }
 
 .qgl-dialog {
-  background: rgba(255, 255, 255, 0.96);
+  background: var(--glass-bg-heavy);
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
   border-radius: 16px;
@@ -127,7 +127,7 @@ defineExpose({ show })
   max-height: 80vh;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 12px 48px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--glass-shadow);
   overflow: hidden;
 }
 
@@ -144,11 +144,11 @@ defineExpose({ show })
 }
 
 .dialog-title-bar.dialog-theme-normal {
-  border-bottom-color: var(--primary, #00BCD4);
+  border-bottom-color: var(--primary);
 }
 
 .dialog-title-bar.dialog-theme-error {
-  border-bottom-color: #f44336;
+  border-bottom-color: var(--danger);
 }
 
 .dialog-title-icon {
@@ -157,11 +157,11 @@ defineExpose({ show })
 }
 
 .dialog-title-bar.dialog-theme-normal .dialog-title-icon {
-  color: var(--primary, #00BCD4);
+  color: var(--primary);
 }
 
 .dialog-title-bar.dialog-theme-error .dialog-title-icon {
-  color: #f44336;
+  color: var(--danger);
 }
 
 .dialog-title-text {
@@ -177,7 +177,7 @@ defineExpose({ show })
 }
 
 .dialog-content-box {
-  background: rgba(0, 0, 0, 0.04);
+  background: var(--glass-bg-light);
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 14px 16px;
@@ -187,7 +187,7 @@ defineExpose({ show })
 }
 
 .dialog-content-box:hover {
-  border-color: var(--primary, #00BCD4);
+  border-color: var(--primary);
 }
 
 .dialog-content-text {
@@ -240,7 +240,7 @@ defineExpose({ show })
 }
 
 .dialog-btn-secondary:hover {
-  border-color: var(--primary, #00BCD4);
+  border-color: var(--primary);
   background: var(--primary-bg);
 }
 
@@ -250,7 +250,7 @@ defineExpose({ show })
 }
 
 .dialog-btn-primary.dialog-theme-normal {
-  background: var(--primary, #00BCD4);
+  background: var(--primary);
 }
 
 .dialog-btn-primary.dialog-theme-normal:hover {
@@ -258,11 +258,11 @@ defineExpose({ show })
 }
 
 .dialog-btn-primary.dialog-theme-error {
-  background: #f44336;
+  background: var(--danger);
 }
 
 .dialog-btn-primary.dialog-theme-error:hover {
-  background: #d32f2f;
+  filter: brightness(0.9);
 }
 
 /* 过渡动画 */

@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"time"
 )
@@ -62,34 +61,16 @@ func (a *BannedPlayerAudit) HasWarnings() bool {
 }
 
 func (a *BannedPlayerAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return "banned-players.json 未发现风险"
-	}
-	sorted := make([]BannedPlayerFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Reason != sorted[j].Reason {
-			return sorted[i].Reason < sorted[j].Reason
-		}
-		return sorted[i].Detail < sorted[j].Detail
-	})
-	var b strings.Builder
-	for i, f := range sorted {
-		if i >= 12 {
-			b.WriteString(fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		if i > 0 {
-			b.WriteString("；")
-		}
-		b.WriteString(f.Reason)
-		if f.Detail != "" {
-			b.WriteString("(")
-			b.WriteString(f.Detail)
-			b.WriteString(")")
-		}
-	}
-	return b.String()
+	return describeAuditFindings("banned-players.json 未发现风险", a.Findings, 12,
+		func(f BannedPlayerFinding) []string {
+			return []string{f.Reason, f.Detail}
+		},
+		func(f BannedPlayerFinding) string {
+			if f.Detail == "" {
+				return f.Reason
+			}
+			return f.Reason + "(" + f.Detail + ")"
+		})
 }
 
 type sbpEntry struct {

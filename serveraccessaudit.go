@@ -156,7 +156,7 @@ func auditAccessFile(serverDir, name string) (AccessFileAudit, error) {
 		})
 		return out, nil
 	}
-	raw, err := os.ReadFile(path)
+	raw, err := readBoundedFile(path, auditTextReadMaxBytes)
 	if err != nil {
 		return out, err
 	}

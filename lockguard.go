@@ -101,14 +101,6 @@ func (s lockState) marshal() ([]byte, error) {
 	return json.Marshal(s)
 }
 
-func lockFailed(r *lockState, lim LockLimits) {
-	r.Fails++
-	if r.Fails >= lim.MaxAttempt {
-		r.Fails = 0
-		r.LockedUntil = time.Now().Add(lim.Cooldown).UnixNano()
-	}
-}
-
 // SetLaunchPIN 设置/更换 PIN。prevHMAC 为空表示首次设置；非空时要求与当前
 // 落盘摘要一致（防止未解锁状态下被直接改锁）。返回错误信息或空串。
 func SetLaunchPIN(store lockStore, pin, prevHMAC string, lim LockLimits) error {

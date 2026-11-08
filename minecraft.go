@@ -1,49 +1,47 @@
-﻿package main
+package main
 
 import (
 	"archive/zip"
-	"bufio"
-	"crypto/md5"
+	"context"
 	"crypto/sha1"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode"
 	"unsafe"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-// launcherVersion 启动器版本号
-const launcherVersion = "1.0.0-PR.4"
-
-// GetLauncherVersion 获取启动器版本号（避免前端硬编码）
-func (a *App) GetLauncherVersion() string {
-	return launcherVersion
-}
-
 // ===== Win32 API 用于窗口检测 =====
 
 var (
-	user32DLL         = syscall.NewLazyDLL("user32.dll")
-	kernel32DLL       = syscall.NewLazyDLL("kernel32.dll")
-	procEnumWindows   = user32DLL.NewProc("EnumWindows")
-	procGetClassName  = user32DLL.NewProc("GetClassNameA")
-	procGetWindowText = user32DLL.NewProc("GetWindowTextA")
-	procGetWindowPID  = user32DLL.NewProc("GetWindowThreadProcessId")
-	procOpenProcess   = kernel32DLL.NewProc("OpenProcess")
+	user32DLL           = syscall.NewLazyDLL("user32.dll")
+	kernel32DLL         = syscall.NewLazyDLL("kernel32.dll")
+	procEnumWindows     = user32DLL.NewProc("EnumWindows")
+	procGetClassName    = user32DLL.NewProc("GetClassNameA")
+	procGetWindowText   = user32DLL.NewProc("GetWindowTextA")
+	procGetWindowPID    = user32DLL.NewProc("GetWindowThreadProcessId")
+	procOpenProcess     = kernel32DLL.NewProc("OpenProcess")
 	procGetProcessTimes = kernel32DLL.NewProc("GetProcessTimes")
-	procCloseHandle   = kernel32DLL.NewProc("CloseHandle")
+	procCloseHandle     = kernel32DLL.NewProc("CloseHandle")
+)
+
+// 下载体积上限，防止恶意服务器用无限流把磁盘/内存写爆。
+const (
+	maxJavaInstallerBytes   = 500 << 20 // 500 MiB，JRE 安装包实际 ~40-70 MiB
+	maxAuthlibPrefetchBytes = 1 << 20   // 1 MiB，authlibinjector 抓取的皮肤站首页
+	maxVersionManifestBytes = 8 << 20   // 8 MiB，版本清单/资产索引 JSON
 )
 
 // MCVersion 表示一个 Minecraft 版本
@@ -81,39 +79,41 @@ type DownloadProgress struct {
 }
 
 // DownloadItem 下载列表项
-// DownloadItem 下载列表项
 type DownloadItem struct {
-	ID             string  `json:"id"`
-	URL            string  `json:"url"`
-	CustomName     string  `json:"customName"`
-	Type           string  `json:"type"`
-	ItemType       string  `json:"itemType"`       // "game", "java", "mod", "loader", "game+loader"
-	JavaMajor      int     `json:"javaMajor"`      // Java 主版本号（仅 Java 类型）
-	SavePath       string  `json:"savePath"`       // 保存路径（仅 Mod 类型）
-	LoaderName     string  `json:"loaderName"`     // 加载器类型（仅 game+loader 类型）
-	LoaderVersion  string  `json:"loaderVersion"`  // 加载器版本（仅 game+loader 类型）
-	OptiFineType   string  `json:"optifineType"`   // OptiFine 类型（仅 game+loader 类型且选 OptiFine 时）
-	OptiFinePatch  string  `json:"optifinePatch"`  // OptiFine Patch（仅 game+loader 类型且选 OptiFine 时）
-	Status         string  `json:"status"`         // pending, downloading, completed, failed
-	Progress       float64 `json:"progress"`
-	CurrentStep    string  `json:"currentStep"`    // 当前步骤说明（下载原版/安装加载器/库文件/资源等）
-	ErrorMsg       string  `json:"errorMsg"`       // 错误信息（仅 failed 状态）
+	ID            string  `json:"id"`
+	URL           string  `json:"url"`
+	CustomName    string  `json:"customName"`
+	Type          string  `json:"type"`
+	ItemType      string  `json:"itemType"`
+	JavaMajor     int     `json:"javaMajor"`
+	SavePath      string  `json:"savePath"`
+	LoaderName    string  `json:"loaderName"`
+	LoaderVersion string  `json:"loaderVersion"`
+	OptiFineType  string  `json:"optifineType"`
+	OptiFinePatch string  `json:"optifinePatch"`
+	Status        string  `json:"status"`
+	Progress      float64 `json:"progress"`
+	ErrorMsg      string  `json:"errorMsg"`
+	// SizeBytes 是该任务“声明”的下载字节数（来自可信镜像/Modrinth files[].size）。
+	// 0 表示未知（服务端未给大小），不参与聚合字节预算求和；负数永远不应出现，
+	// 预算内核会拒绝。该字段仅用于下载队列的聚合磁盘预算，不改变分发逻辑。
+	SizeBytes int64 `json:"sizeBytes"`
 }
 
 // 版本 JSON 相关结构体
 
 type VersionJSON struct {
-	ID              string           `json:"id"`
-	Type            string           `json:"type"`
-	MainClass       string           `json:"mainClass"`
-	MinecraftArgs   string           `json:"minecraftArguments"`
-	Arguments       *ArgumentsObj    `json:"arguments"`
-	Libraries       []Library        `json:"libraries"`
-	Downloads       *VersionDownloads `json:"downloads"`
-	AssetIndex      *AssetIndexRef   `json:"assetIndex"`
-	ReleaseTime     string           `json:"releaseTime"`
-	InheritsFrom    string           `json:"inheritsFrom"`
-	Jar             string           `json:"jar"`
+	ID            string            `json:"id"`
+	Type          string            `json:"type"`
+	MainClass     string            `json:"mainClass"`
+	MinecraftArgs string            `json:"minecraftArguments"`
+	Arguments     *ArgumentsObj     `json:"arguments"`
+	Libraries     []Library         `json:"libraries"`
+	Downloads     *VersionDownloads `json:"downloads"`
+	AssetIndex    *AssetIndexRef    `json:"assetIndex"`
+	ReleaseTime   string            `json:"releaseTime"`
+	InheritsFrom  string            `json:"inheritsFrom"`
+	Jar           string            `json:"jar"`
 }
 
 type ArgumentsObj struct {
@@ -126,8 +126,8 @@ type Library struct {
 	Downloads *LibDownloads     `json:"downloads"`
 	Natives   map[string]string `json:"natives"`
 	Rules     []Rule            `json:"rules"`
-	URL       string            `json:"url"`      // 有些库直接提供 URL
-	JarPath   string            `json:"path"`      // 有些库直接提供 path（如 Forge 安装器解压的）
+	URL       string            `json:"url"`
+	JarPath   string            `json:"path"`
 }
 
 type LibDownloads struct {
@@ -143,12 +143,15 @@ type LibArtifact struct {
 }
 
 type Rule struct {
-	Action string  `json:"action"`
-	OS     *RuleOS `json:"os"`
+	Action   string          `json:"action"`
+	OS       *RuleOS         `json:"os"`
+	Features map[string]bool `json:"features"`
 }
 
 type RuleOS struct {
-	Name string `json:"name"`
+	Name    string `json:"name"`
+	Arch    string `json:"arch"`
+	Version string `json:"version"`
 }
 
 type VersionDownloads struct {
@@ -173,471 +176,252 @@ type AssetObject struct {
 	Size int64  `json:"size"`
 }
 
-// getMinecraftDir 获取 .minecraft 目录
-func (a *App) getMinecraftDir() string {
-	return a.GetMinecraftDir()
+// InstalledVersionInfo 安装版本的信息
+type InstalledVersionInfo struct {
+	FolderName string `json:"folderName"`
+	Name       string `json:"name"`
+	Version    string `json:"version"`
+	Loader     string `json:"loader"`
+	Type       string `json:"type"`
 }
 
-// replaceWithBMCLAPI 将 Mojang URL 替换为 BMCLAPI 镜像
-func replaceWithBMCLAPI(url string) string {
-	url = strings.Replace(url, "https://piston-meta.mojang.com", "https://bmclapi2.bangbang93.com", 1)
-	url = strings.Replace(url, "https://launcher.mojang.com", "https://bmclapi2.bangbang93.com", 1)
-	url = strings.Replace(url, "https://libraries.minecraft.net", "https://bmclapi2.bangbang93.com/maven", 1)
-	return url
-}
-
-// emitProgress 发送下载进度事件，同时更新下载列表中当前下载项的进度
-// 高频下载时进行节流（100ms），避免事件风暴导致前端卡顿；终态（completed/failed）不节流
-var lastProgressEmit time.Time
-
-// setProgressScale 设置当前下载项的阶段进度映射：内部子进度 pct (0-100) 显示为 base + pct/100*span
-// 用于把多个阶段（jar/库/资源/安装器运行等）组合成整项的总百分比，避免某阶段无进度时卡在 0%
-func (a *App) setProgressScale(base, span float64) {
-	a.progressBase = base
-	a.progressSpan = span
-}
-
-// mapProgressToScale 将子进度映射到当前阶段区间
-func (a *App) mapProgressToScale(pct float64) float64 {
-	if a.progressSpan <= 0 {
-		return pct
-	}
-	mapped := a.progressBase + pct/100*a.progressSpan
-	if mapped > 100 {
-		mapped = 100
-	}
-	return mapped
-}
+func (a *App) getMinecraftDir() string { return a.GetMinecraftDir() }
 
 func (a *App) emitProgress(status string, currentFile string, downloaded, total int64) {
-	// 节流：非终态且距上次发送不足 100ms 时跳过
-	if status != "completed" && status != "failed" {
-		if time.Since(lastProgressEmit) < 100*time.Millisecond {
-			// 仍然更新内存中的进度，但不发事件
-			var pct float64
-			if total > 0 {
-				pct = float64(downloaded) / float64(total) * 100
-			}
-			a.downloadMutex.Lock()
-			for i := range a.downloadList {
-				if a.downloadList[i].Status == "downloading" {
-					a.downloadList[i].Progress = a.mapProgressToScale(pct)
-					a.downloadList[i].CurrentStep = currentFile
-					break
-				}
-			}
-			a.downloadMutex.Unlock()
-			return
-		}
-	}
-	lastProgressEmit = time.Now()
-
 	var pct float64
 	if total > 0 {
 		pct = float64(downloaded) / float64(total) * 100
 	}
 	a.downloadProgress = DownloadProgress{
-		TotalBytes:      total,
-		DownloadedBytes: downloaded,
-		Percentage:      pct,
-		CurrentFile:     currentFile,
-		Status:          status,
+		TotalBytes: total, DownloadedBytes: downloaded, Percentage: pct,
+		CurrentFile: currentFile, Status: status,
 	}
-
-	// 更新下载列表中正在下载项的进度（映射到阶段区间）
 	a.downloadMutex.Lock()
 	for i := range a.downloadList {
 		if a.downloadList[i].Status == "downloading" {
-			a.downloadList[i].Progress = a.mapProgressToScale(pct)
-			a.downloadList[i].CurrentStep = currentFile
+			a.downloadList[i].Progress = pct
 			break
 		}
 	}
 	a.downloadMutex.Unlock()
-
 	runtime.EventsEmit(a.ctx, "downloadProgress", a.downloadProgress)
 	runtime.EventsEmit(a.ctx, "downloadListUpdated", a.GetDownloadList())
 }
 
-// emitFixProgress 启动补全阶段的进度上报：
-// 除常规 downloadProgress（下载列表）外，同时发 launchFixProgress（启动界面遮罩显示步骤文本），
-// 否则启动界面只会显示静态的"补全文件中..."，用户会以为卡死
-func (a *App) emitFixProgress(step string, done, total int64) {
-	a.emitProgress("downloading", step, done, total)
-	runtime.EventsEmit(a.ctx, "launchFixProgress", step)
+// maxUnverifiedDownloadBytes 未做哈希校验的下载上限 4 GiB。
+// 走这个函数的库 / 安装器体积都远小于此值；正常数据永远碰不到，
+// 只有被劫持的镜像持续灌数据炸磁盘时才会触发中止并删除残文件。
+const maxUnverifiedDownloadBytes int64 = 4 << 30
+
+// maxMetadataJSONBytes 版本 JSON / 资产索引这类元数据 JSON 的上限。
+// 官方文件只有几百 KB ~ 数 MB；它们走通用下载（4 GiB）落地后又被
+// os.ReadFile 整体读进内存，被劫持镜像灌一个 GB 级"json"会直接 OOM。
+// 单独收窄到 16 MiB，正常数据永远碰不到。
+const maxMetadataJSONBytes int64 = 16 << 20
+
+// maxAssetObjectBytes 单个 assets/objects 资源对象上限。
+// 内容寻址（路径/URL 即 SHA1），普通贴图/语言文件几 KB，音乐较大也远小于此。
+const maxAssetObjectBytes int64 = 256 << 20
+
+var errDownloadTooLarge = errors.New("下载体积超过安全上限")
+
+// cappedReader 读到第 max+1 个字节时返回 errDownloadTooLarge，
+// 配合调用方删除残文件，避免恶意端点靠超大响应撑爆磁盘。
+type cappedReader struct {
+	r   io.Reader
+	n   int64
+	max int64
 }
 
-// formatBytesForProgress 将字节数格式化为 MB 显示（进度步骤文本用）
-func formatBytesForProgress(b int64) string {
-	return fmt.Sprintf("%.1f MB", float64(b)/1024/1024)
+func (c *cappedReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	if c.n > c.max {
+		return n, errDownloadTooLarge
+	}
+	return n, err
 }
 
-// downloadFileMultiThread 多线程分段下载单个文件（参考补全文件的并发思路）
-// 通过 HTTP Range 将文件分成 threads 段并行下载；服务器不支持 Range 时自动回退单线程
-// 进度通过 emitProgress 上报（文件名 + 已下载字节/总字节），total<=0 时步骤文本显示已下载量
-func (a *App) downloadFileMultiThread(url string, destPath string, threads int) error {
-	if threads < 1 {
-		threads = 8
-	}
-	os.MkdirAll(filepath.Dir(destPath), 0755)
+// errLocalFileTooLarge 表示本地文件实际体积超过读取上限。调用方用 errors.Is
+// 区分“文件被异常撑大（不应把截断内容当正常配置回写 / 落盘）”与普通读取错误。
+var errLocalFileTooLarge = errors.New("本地文件超过安全读取上限")
 
-	// 已存在则跳过
-	if info, err := os.Stat(destPath); err == nil && info.Size() > 0 {
-		return nil
-	}
+// localTextConfigMaxBytes 是“读进内存再改写回盘”的纯文本配置（如 options.txt）
+// 的默认上限（64MiB）。这类文件正常只有几 KiB，阈值刻意取很宽，只拦被塞成
+// GB 级、真能把内存/磁盘撑爆的异常文件（炸磁盘才拦），不跟正常内容过不去。
+// 注意它是“读进内存”的上限，不能像下载聚合预算那样取到 TiB 量级。
+const localTextConfigMaxBytes int64 = 64 << 20
 
-	req, err := http.NewRequest("GET", url, nil)
+// readBoundedFile 把本地文件读入内存，但先用 stat 体积、再用 LimitReader+1
+// 双保险封顶，防止把磁盘上被塞成 GB 级的"元数据 JSON / 配置"整体读进内存导致 OOM。
+//
+// 另外两点加固：
+//   - 符号链接 / 特殊文件一律拒绝（isSymlinkOrSpecial），避免顺着链接把设备或
+//     目录外文件读进来；
+//   - 体积超限统一包装成 errLocalFileTooLarge，调用方可 errors.Is 精确识别，
+//     而不是靠匹配错误字符串。
+func readBoundedFile(path string, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		return nil, errors.New("readBoundedFile 必须指定正的体积上限")
+	}
+	if bad, err := isSymlinkOrSpecial(path); err != nil {
+		return nil, err
+	} else if bad {
+		return nil, fmt.Errorf("拒绝读取符号链接或非普通文件: %s", path)
+	}
+	f, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("创建请求失败 %s: %v", url, err)
+		return nil, err
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.216 CosyBrowser/146.3.1")
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	// 先发 HEAD/Range 探测：获取总大小与是否支持分段
-	probe, err := client.Do(req)
+	defer f.Close()
+	if info, err := f.Stat(); err == nil && info.Size() > maxBytes {
+		return nil, fmt.Errorf("%w: 文件 %s 体积 %d 超过上限 %d",
+			errLocalFileTooLarge, path, info.Size(), maxBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
 	if err != nil {
-		return fmt.Errorf("下载失败 %s: %v", url, err)
+		return nil, err
 	}
-	if probe.StatusCode != http.StatusOK {
-		probe.Body.Close()
-		return fmt.Errorf("下载失败 %s: HTTP %d", url, probe.StatusCode)
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("%w: 文件 %s 实际超过上限 %d",
+			errLocalFileTooLarge, path, maxBytes)
 	}
-	total := probe.ContentLength
-	acceptRanges := probe.Header.Get("Accept-Ranges")
-	probe.Body.Close()
-
-	name := filepath.Base(destPath)
-	if total <= 0 || !strings.EqualFold(acceptRanges, "bytes") {
-		// 服务器不支持分段或大小未知 → 单线程流式下载
-		return a.downloadFileStream(url, destPath, name, total)
-	}
-
-	// 分段并行下载到临时文件，最后合并
-	partDir := destPath + ".qglparts"
-	os.RemoveAll(partDir)
-	os.MkdirAll(partDir, 0755)
-	defer os.RemoveAll(partDir)
-
-	segmentSize := total / int64(threads)
-	type segment struct {
-		index int64
-		start int64
-		end   int64
-	}
-	segments := make([]segment, 0, threads)
-	var start int64
-	for i := 0; i < threads; i++ {
-		end := start + segmentSize - 1
-		if i == threads-1 {
-			end = total - 1
-		}
-		if start > end {
-			break
-		}
-		segments = append(segments, segment{index: int64(i), start: start, end: end})
-		start = end + 1
-	}
-
-	var (
-		wg        sync.WaitGroup
-		downloaded int64
-		mu        sync.Mutex
-		firstErr  error
-		lastEmit  time.Time
-	)
-	wg.Add(len(segments))
-	for _, seg := range segments {
-		seg := seg
-		go func() {
-			defer wg.Done()
-			preq, err := http.NewRequest("GET", url, nil)
-			if err != nil {
-				mu.Lock()
-				if firstErr == nil {
-					firstErr = err
-				}
-				mu.Unlock()
-				return
-			}
-			preq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.216 CosyBrowser/146.3.1")
-			preq.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", seg.start, seg.end))
-
-			resp, err := http.DefaultClient.Do(preq)
-			if err != nil {
-				mu.Lock()
-				if firstErr == nil {
-					firstErr = err
-				}
-				mu.Unlock()
-				return
-			}
-			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusPartialContent && resp.StatusCode != http.StatusOK {
-				mu.Lock()
-				if firstErr == nil {
-					firstErr = fmt.Errorf("HTTP %d", resp.StatusCode)
-				}
-				mu.Unlock()
-				return
-			}
-
-			partPath := filepath.Join(partDir, fmt.Sprintf("%04d.part", seg.index))
-			pf, err := os.Create(partPath)
-			if err != nil {
-				mu.Lock()
-				if firstErr == nil {
-					firstErr = err
-				}
-				mu.Unlock()
-				return
-			}
-			defer pf.Close()
-
-			buf := make([]byte, 64*1024)
-			for {
-				n, readErr := resp.Body.Read(buf)
-				if n > 0 {
-					if _, werr := pf.Write(buf[:n]); werr != nil {
-						mu.Lock()
-						if firstErr == nil {
-							firstErr = werr
-						}
-						mu.Unlock()
-						return
-					}
-					atomic.AddInt64(&downloaded, int64(n))
-					// 进度上报（加锁避免时间戳竞争，200ms 节流）
-					mu.Lock()
-					if time.Since(lastEmit) > 200*time.Millisecond {
-						lastEmit = time.Now()
-						dl := atomic.LoadInt64(&downloaded)
-						mu.Unlock()
-						a.emitProgress("downloading", fmt.Sprintf("%s %s/%s (%d%%)", name, formatBytesForProgress(dl), formatBytesForProgress(total), dl*100/total), dl, total)
-						continue
-					}
-					mu.Unlock()
-				}
-				if readErr == io.EOF {
-					return
-				}
-				if readErr != nil {
-					mu.Lock()
-					if firstErr == nil {
-						firstErr = readErr
-					}
-					mu.Unlock()
-					return
-				}
-			}
-		}()
-	}
-	wg.Wait()
-
-	if firstErr != nil {
-		return fmt.Errorf("下载失败 %s: %v", url, firstErr)
-	}
-
-	// 合并分段文件
-	out, err := os.Create(destPath)
-	if err != nil {
-		return fmt.Errorf("创建文件失败 %s: %v", destPath, err)
-	}
-	defer out.Close()
-	for _, seg := range segments {
-		partPath := filepath.Join(partDir, fmt.Sprintf("%04d.part", seg.index))
-		pf, err := os.Open(partPath)
-		if err != nil {
-			return fmt.Errorf("合并分段失败: %v", err)
-		}
-		_, err = io.Copy(out, pf)
-		pf.Close()
-		if err != nil {
-			return fmt.Errorf("合并分段失败: %v", err)
-		}
-	}
-	a.emitProgress("downloading", name, total, total)
-	return nil
+	return data, nil
 }
 
-// downloadFileStream 单线程流式下载（多线程的回退路径），带进度
-func (a *App) downloadFileStream(url string, destPath string, name string, total int64) error {
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return fmt.Errorf("创建请求失败 %s: %v", url, err)
+// downloadContext 返回一个与“下载列表取消信号”绑定的 context。
+// 之前 CancelDownloadList 只能在两个文件之间跳出循环，正在传输的大文件
+// 仍要等下完才停；把请求挂到这个 context 上后，取消会立刻中断进行中的 HTTP 读取。
+// 非下载列表场景（如启动时补全文件）没有取消信号，返回普通 Background context。
+func (a *App) downloadContext() (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	a.downloadMutex.Lock()
+	ch := a.downloadCancel
+	a.downloadMutex.Unlock()
+	if ch == nil {
+		return ctx, cancel
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.216 CosyBrowser/146.3.1")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("下载失败 %s: %v", url, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("下载失败 %s: HTTP %d", url, resp.StatusCode)
-	}
-	if resp.ContentLength > 0 {
-		total = resp.ContentLength
-	}
-
-	out, err := os.Create(destPath)
-	if err != nil {
-		return fmt.Errorf("创建文件失败 %s: %v", destPath, err)
-	}
-	defer out.Close()
-
-	var downloaded int64
-	buf := make([]byte, 64*1024)
-	for {
-		n, readErr := resp.Body.Read(buf)
-		if n > 0 {
-			if _, werr := out.Write(buf[:n]); werr != nil {
-				return werr
-			}
-			downloaded += int64(n)
-			if total > 0 {
-				a.emitProgress("downloading", fmt.Sprintf("%s %s/%s (%d%%)", name, formatBytesForProgress(downloaded), formatBytesForProgress(total), downloaded*100/total), downloaded, total)
-			} else {
-				// 总大小未知（如 chunked 传输）：进度条保持 0，步骤文本显示已下载量
-				a.emitProgress("downloading", fmt.Sprintf("%s %s", name, formatBytesForProgress(downloaded)), 0, 0)
-			}
+	go func() {
+		select {
+		case <-ch:
+			cancel()
+		case <-ctx.Done():
 		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			return readErr
-		}
-	}
-	return nil
+	}()
+	return ctx, cancel
 }
 
-// downloadFile 下载文件到指定路径
 func (a *App) downloadFile(url string, destPath string, reportProgress bool) error {
-	dir := filepath.Dir(destPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("创建目录失败 %s: %v", dir, err)
-	}
+	return a.downloadFileBounded(url, destPath, reportProgress, maxUnverifiedDownloadBytes)
+}
 
-	// 如果文件已存在，跳过下载
+// downloadFileBounded 与 downloadFile 相同，但允许调用方按文件类型指定体积上限，
+// 让版本 JSON / 资产索引等小元数据不必套用 4 GiB 的宽松上限。
+//
+// 实际的 HTTP 请求 / 体积双校验 / 流式 sha256 / 原子落盘 / 503 退避重试统一走
+// streamVerifiedDownload：这里只保留"已存在跳过""进度上报到前端""错误归一化"
+// 三层 App 语义，避免各下载点各自手写请求体。
+func (a *App) downloadFileBounded(url string, destPath string, reportProgress bool, maxBytes int64) error {
+	if !isHTTPSURL(url) {
+		return fmt.Errorf("拒绝不安全的下载 URL（非 HTTPS）: %s", url)
+	}
+	dir := filepath.Dir(destPath)
+	// 统一走 ensurePrivateDir：除创建外还会把已存在但权限过宽（如历史 0755）的目录
+	// 收敛到 0700。所有 downloadFile/downloadFileBounded/downloadVerifiedFile 都汇聚到这里，
+	// 各调用点不再各自 MkdirAll。
+	if err := ensurePrivateDir(dir); err != nil {
+		return fmt.Errorf("创建目录失败 %s: %w", dir, err)
+	}
 	if info, err := os.Stat(destPath); err == nil && info.Size() > 0 {
 		return nil
 	}
-
-	// 创建请求并添加 User-Agent（避免 BMCLAPI 403 拦截）
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return fmt.Errorf("创建请求失败 %s: %v", url, err)
+	ctx, cancelReq := a.downloadContext()
+	defer cancelReq()
+	opts := secureDownloadOptions{
+		MaxBytes:  maxBytes,
+		Attempts:  3,
+		UserAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+		Client:    safeHTTPClient(),
 	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.216 CosyBrowser/146.3.1")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
+	if reportProgress {
+		opts.Progress = func(received, total int64) {
+			a.emitProgress("downloading", filepath.Base(destPath), received, total)
+		}
+	}
+	if _, err := streamVerifiedDownload(ctx, url, destPath, opts); err != nil {
+		// 下载台账：传输失败留痕（无论是否有哈希期望，失败都要可审计）。
+		a.RecordDownloadEntry(url, ledgerHostOf(url), filepath.Base(destPath), "", "", LedgerStatusFailed, -1)
+		if errors.Is(err, errSecureDownloadTooLarge) {
+			return fmt.Errorf("下载失败 %s: %w", url, errDownloadTooLarge)
+		}
 		return fmt.Errorf("下载失败 %s: %v", url, err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("下载失败 %s: HTTP %d", url, resp.StatusCode)
-	}
-
-	out, err := os.Create(destPath)
-	if err != nil {
-		return fmt.Errorf("创建文件失败 %s: %v", destPath, err)
-	}
-	defer out.Close()
-
-	if reportProgress {
-		total := resp.ContentLength
-		var downloaded int64
-		buf := make([]byte, 32*1024)
-		for {
-			n, err := resp.Body.Read(buf)
-			if n > 0 {
-				_, werr := out.Write(buf[:n])
-				if werr != nil {
-					return werr
-				}
-				downloaded += int64(n)
-				a.emitProgress("downloading", filepath.Base(destPath), downloaded, total)
-			}
-			if err == io.EOF {
-				break
-			}
-			if err != nil {
-				return err
-			}
-		}
-	} else {
-		_, err = io.Copy(out, resp.Body)
-		if err != nil {
-			return fmt.Errorf("写入文件失败 %s: %v", destPath, err)
-		}
-	}
-
 	return nil
 }
 
-// GetVersionManifest 获取版本清单，优先使用 BMCLAPI，失败回退 Mojang
+// downloadVerifiedFile 下载并校验官方 SHA1；缓存命中走侧车摘要链
+// （UMFS -> SHA512 -> SHA1）快速复用，新下载落盘则以官方 SHA1 为唯一信任锚
+// 校验通过后再补写 UMFS/SHA512 侧车；校验失败删除重下一次。
+func (a *App) downloadVerifiedFile(url string, destPath string, expectedSHA1 string, reportProgress bool) error {
+	if expectedSHA1 == "" {
+		return a.downloadFile(url, destPath, reportProgress)
+	}
+	expected := strings.ToLower(strings.TrimSpace(expectedSHA1))
+	if info, err := os.Stat(destPath); err == nil && info.Size() > 0 && a.verifyCachedFile(destPath, expected) {
+		return nil
+	}
+	os.Remove(destPath)
+	removeCachedFileMeta(destPath)
+	if err := a.downloadFile(url, destPath, reportProgress); err != nil {
+		return err
+	}
+	// 外部协议摘要（Mojang SHA1）保持原算法，是首次下载唯一的权威校验。
+	if !a.checkFileHash(destPath, expected) {
+		os.Remove(destPath)
+		removeCachedFileMeta(destPath)
+		// 下载台账：官方 SHA1 校验不通过 = 潜在供应链异常，critical 留痕。
+		a.RecordDownloadEntry(url, ledgerHostOf(url), filepath.Base(destPath), "sha1", expected, LedgerStatusMismatch, -1)
+		return fmt.Errorf("SHA1 校验失败: %s", destPath)
+	}
+	// 官方 SHA1 已通过：本地缓存摘要用 bool-hybrid-array 生态的 UMFS 优先记录。
+	if err := a.saveCachedFileMeta(destPath, expected); err != nil {
+		a.writeLog("缓存元数据写入失败（不影响完整性）: %s: %v", destPath, err)
+	}
+	// 下载台账：Mojang SHA1 校验通过后记 ok（哈希保持原算法 sha1）。
+	a.RecordDownloadEntry(url, ledgerHostOf(url), filepath.Base(destPath), "sha1", expected, LedgerStatusOK, -1)
+	return nil
+}
+
+// GetVersionManifest 获取版本清单
 func (a *App) GetVersionManifest() ([]MCVersion, error) {
 	urls := []string{
 		"https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json",
 		"https://piston-meta.mojang.com/mc/game/version_manifest_v2.json",
 	}
-
-	var body []byte
-	var lastErr error
-
-	for _, u := range urls {
-		resp, err := http.Get(u)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			lastErr = fmt.Errorf("HTTP %d from %s", resp.StatusCode, u)
-			continue
-		}
-
-		body, err = io.ReadAll(resp.Body)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		lastErr = nil
-		break
-	}
-
-	if lastErr != nil {
-		return nil, fmt.Errorf("获取版本清单失败: %v", lastErr)
-	}
-
 	var manifest VersionManifest
-	if err := json.Unmarshal(body, &manifest); err != nil {
-		return nil, fmt.Errorf("解析版本清单失败: %v", err)
+	opts := jsonFetchOptions{
+		MaxBytes:        maxVersionManifestBytes,
+		Attempts:        2,
+		UserAgent:       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+		Client:          safeHTTPClient(),
+		AllowMediaTypes: []string{"application/json"},
+		SourceLabel:     "版本清单",
 	}
-
+	if err := fetchJSONFromMirrors(context.Background(), urls, &manifest, opts); err != nil {
+		return nil, fmt.Errorf("获取版本清单失败: %v", err)
+	}
 	var result []MCVersion
 	for _, v := range manifest.Versions {
 		if v.Type == "release" || v.Type == "snapshot" {
-			result = append(result, MCVersion{
-				ID:          v.ID,
-				Type:        v.Type,
-				URL:         v.URL,
-				ReleaseTime: v.ReleaseTime,
-			})
+			result = append(result, MCVersion{ID: v.ID, Type: v.Type, URL: v.URL, ReleaseTime: v.ReleaseTime})
 		}
 	}
-
 	return result, nil
 }
 
-// GetInstalledVersions 获取已安装的版本列表（仅读取，不扫描创建 config.json）
 func (a *App) GetInstalledVersions() ([]InstalledVersionInfo, error) {
 	mcDir := a.getMinecraftDir()
 	versionsDir := filepath.Join(mcDir, "versions")
-
 	entries, err := os.ReadDir(versionsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -645,30 +429,24 @@ func (a *App) GetInstalledVersions() ([]InstalledVersionInfo, error) {
 		}
 		return nil, fmt.Errorf("读取版本目录失败: %v", err)
 	}
-
 	var installed []InstalledVersionInfo
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
 		versionFolder := filepath.Join(versionsDir, entry.Name())
-		// 验证版本是否完整安装
 		if !a.validateVersionInstallation(versionFolder) {
 			continue
 		}
-
 		info := a.readVersionInfo(versionFolder, entry.Name())
 		installed = append(installed, info)
 	}
-
 	return installed, nil
 }
 
-// ScanVersions 扫描所有版本文件夹，创建/更新 QGL/config.json，返回最新列表
 func (a *App) ScanVersions() ([]InstalledVersionInfo, error) {
 	mcDir := a.getMinecraftDir()
 	versionsDir := filepath.Join(mcDir, "versions")
-
 	entries, err := os.ReadDir(versionsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -676,7 +454,6 @@ func (a *App) ScanVersions() ([]InstalledVersionInfo, error) {
 		}
 		return nil, fmt.Errorf("读取版本目录失败: %v", err)
 	}
-
 	var installed []InstalledVersionInfo
 	for _, entry := range entries {
 		if !entry.IsDir() {
@@ -686,79 +463,45 @@ func (a *App) ScanVersions() ([]InstalledVersionInfo, error) {
 		if !a.validateVersionInstallation(versionFolder) {
 			continue
 		}
-
 		info := a.scanVersionFolder(versionFolder, entry.Name())
 		installed = append(installed, info)
 	}
-
 	return installed, nil
 }
 
-// InstalledVersionInfo 安装版本的信息
-type InstalledVersionInfo struct {
-	FolderName string `json:"folderName"` // 文件夹名（用于启动）
-	Name       string `json:"name"`       // 显示名（可能为空）
-	Version    string `json:"version"`    // 游戏版本（如 1.12.2）
-	Loader     string `json:"loader"`     // 加载器（forge/fabric/neoforge，可能为空）
-	Type       string `json:"type"`       // 类型：game/loader/modpack
+// readQGLVersionConfig 有界读取某个版本目录下启动器自写的 QGL/config.json。
+// 历史上 readVersionInfo / scanVersionFolder 各自 os.ReadFile+Unmarshal 一份，
+// 既重复又没有体积上限；统一收口到 readLocalJSONBounded。
+func readQGLVersionConfig(versionFolder string) (map[string]string, bool) {
+	configPath := filepath.Join(versionFolder, "QGL", "config.json")
+	var config map[string]string
+	if err := readLocalJSONBounded(configPath, &config, 0, "版本 QGL 配置"); err != nil {
+		return nil, false
+	}
+	return config, true
 }
 
-// readVersionInfo 仅读取 QGL/config.json，没有则返回基本信息（不创建）
 func (a *App) readVersionInfo(versionFolder string, folderName string) InstalledVersionInfo {
-	configPath := filepath.Join(versionFolder, "QGL", "config.json")
-	if data, err := os.ReadFile(configPath); err == nil {
-		var config map[string]string
-		if err := json.Unmarshal(data, &config); err == nil {
-			return InstalledVersionInfo{
-				FolderName: folderName,
-				Name:       config["name"],
-				Version:    config["version"],
-				Loader:     config["loader"],
-				Type:       config["type"],
-			}
+	if config, ok := readQGLVersionConfig(versionFolder); ok {
+		return InstalledVersionInfo{
+			FolderName: folderName, Name: config["name"],
+			Version: config["version"], Loader: config["loader"], Type: config["type"],
 		}
 	}
-	// 没有 config.json，返回基本信息
-	return InstalledVersionInfo{
-		FolderName: folderName,
-		Name:       "",
-		Version:    folderName,
-		Loader:     "",
-		Type:       "game",
-	}
+	return InstalledVersionInfo{FolderName: folderName, Version: folderName, Type: "game"}
 }
 
-// scanVersionFolder 扫描版本文件夹，解析版本 JSON，创建/更新 QGL/config.json
 func (a *App) scanVersionFolder(versionFolder string, folderName string) InstalledVersionInfo {
-	// 1. 尝试读取已有的 QGL/config.json
-	configPath := filepath.Join(versionFolder, "QGL", "config.json")
-	if data, err := os.ReadFile(configPath); err == nil {
-		var config map[string]string
-		if err := json.Unmarshal(data, &config); err == nil {
-			return InstalledVersionInfo{
-				FolderName: folderName,
-				Name:       config["name"],
-				Version:    config["version"],
-				Loader:     config["loader"],
-				Type:       config["type"],
-			}
+	if config, ok := readQGLVersionConfig(versionFolder); ok {
+		return InstalledVersionInfo{
+			FolderName: folderName, Name: config["name"],
+			Version: config["version"], Loader: config["loader"], Type: config["type"],
 		}
 	}
-
-	// 2. 没有 config.json，解析版本 JSON 创建
 	versionJSON, err := a.resolveVersionJSON(folderName)
 	if err != nil {
-		// 解析失败，返回基本信息
-		return InstalledVersionInfo{
-			FolderName: folderName,
-			Name:       "",
-			Version:    folderName,
-			Loader:     "",
-			Type:       "game",
-		}
+		return InstalledVersionInfo{FolderName: folderName, Version: folderName, Type: "game"}
 	}
-
-	// 读取原始 JSON 文本用于检测 loader
 	jsonPath := filepath.Join(versionFolder, folderName+".json")
 	if _, err := os.Stat(jsonPath); err != nil {
 		jsonFiles, _ := filepath.Glob(filepath.Join(versionFolder, "*.json"))
@@ -766,118 +509,123 @@ func (a *App) scanVersionFolder(versionFolder string, folderName string) Install
 			jsonPath = jsonFiles[0]
 		}
 	}
-	jsonText, _ := os.ReadFile(jsonPath)
-
-	// 检测 loader（参考 PCL ModMinecraft.vb）
+	jsonText, _ := readBoundedFile(jsonPath, maxMetadataJSONBytes)
 	loader := ""
 	if strings.Contains(string(jsonText), "net.fabricmc:fabric-loader") {
 		loader = "fabric"
 	} else if strings.Contains(string(jsonText), "org.quiltmc:quilt-loader") {
 		loader = "quilt"
-	} else if strings.Contains(string(jsonText), "net.neoforge") {
+	} else if strings.Contains(string(jsonText), "net.neoforged") {
 		loader = "neoforge"
-	} else if strings.Contains(string(jsonText), "minecraftforge") && !strings.Contains(string(jsonText), "net.neoforge") {
+	} else if strings.Contains(string(jsonText), "minecraftforge") && !strings.Contains(string(jsonText), "net.neoforged") {
 		loader = "forge"
 	}
-
-	// 确定游戏版本
 	gameVersion := versionJSON.InheritsFrom
 	if gameVersion == "" {
 		gameVersion = versionJSON.ID
 	}
-
-	// 确定类型
 	versionType := "game"
 	if loader != "" {
 		versionType = "loader"
 	}
-
-	info := InstalledVersionInfo{
-		FolderName: folderName,
-		Name:       "",
-		Version:    gameVersion,
-		Loader:     loader,
-		Type:       versionType,
-	}
-
-	// 3. 创建 QGL/config.json
+	info := InstalledVersionInfo{FolderName: folderName, Version: gameVersion, Loader: loader, Type: versionType}
 	configDir := filepath.Join(versionFolder, "QGL")
-	if err := os.MkdirAll(configDir, 0755); err == nil {
-		config := map[string]string{
-			"type":    versionType,
-			"name":    "",
-			"version": gameVersion,
-			"loader":  loader,
-		}
-		configData, _ := json.MarshalIndent(config, "", "  ")
-		os.WriteFile(filepath.Join(configDir, "config.json"), configData, 0644)
+	if err := ensurePrivateDir(configDir); err == nil {
+		config := map[string]string{"type": versionType, "name": "", "version": gameVersion, "loader": loader}
+		// 版本标记 config.json 走有界原子私有写，并对已存在的宽权限目录统一收权到 0700。
+		_ = writePrivateJSON(filepath.Join(configDir, "config.json"), config)
 	}
-
 	return info
 }
 
-// ===== 下载列表功能 =====
-
-// AddToDownloadList 添加版本到下载列表
 func (a *App) AddToDownloadList(versionID string, versionURL string, customName string, versionType string) error {
 	a.downloadMutex.Lock()
 	defer a.downloadMutex.Unlock()
-
-	for _, item := range a.downloadList {
-		if item.CustomName == customName {
-			return fmt.Errorf("下载列表中已存在同名版本: %s", customName)
-		}
+	// 版本名会直接成为 versions/<name>/<name>.json 的目录段，走严格名单段内核：
+	// 控制字符、路径分隔符、Windows 保留设备名、尾点空格、超长一律拒绝（而不是像旧
+	// sanitizeVersionName 那样静默删字符，导致用户以为写入的目录与实际不一致）。
+	safeName, why := SafeVersionComponent(customName)
+	if why != nameRejectNone {
+		recordSecurityEvent(auditCategoryPrivateWrite, auditSeverityWarn, auditActionRejected,
+			"minecraft", "拒绝非法版本下载名: "+describeNameReject(why))
+		return fmt.Errorf("版本名称无效: %s", describeNameReject(why))
 	}
-
-	a.downloadList = append(a.downloadList, DownloadItem{
-		ID:         versionID,
-		URL:        versionURL,
-		CustomName: customName,
-		Type:       versionType,
-		ItemType:   "game",
-		Status:     "pending",
-		Progress:   0,
-	})
-
+	customName = safeName
+	pending := DownloadItem{
+		ID: versionID, URL: versionURL, CustomName: customName,
+		Type: versionType, ItemType: "game", Status: "pending", Progress: 0,
+	}
+	if why := auditDownloadItemForEnqueue(a.downloadList, pending); why != dqRejectNone {
+		return fmt.Errorf("%s", describeQueueReject(why))
+	}
+	if why := auditDownloadItemFields(pending, a.GetMinecraftDir()); why != dfRejectNone {
+		return fmt.Errorf("%s", describeDownloadFieldReject(why))
+	}
+	a.downloadList = append(a.downloadList, pending)
 	runtime.EventsEmit(a.ctx, "downloadListUpdated", a.downloadList)
 	return nil
 }
 
-// AddToDownloadListWithLoader 添加带加载器的游戏到下载列表
 func (a *App) AddToDownloadListWithLoader(versionID string, versionURL string, customName string, versionType string, loaderName string, loaderVersion string, optifineType string, optifinePatch string) error {
 	a.downloadMutex.Lock()
 	defer a.downloadMutex.Unlock()
-
+	safeName, why := SafeVersionComponent(customName)
+	if why != nameRejectNone {
+		recordSecurityEvent(auditCategoryPrivateWrite, auditSeverityWarn, auditActionRejected,
+			"minecraft", "拒绝非法版本下载名: "+describeNameReject(why))
+		return fmt.Errorf("版本名称无效: %s", describeNameReject(why))
+	}
+	customName = safeName
+	// loaderName / loaderVersion 会被拼进展示名，最终也成为版本目录名，同样必须是
+	// 干净单段（前端可传任意字符串，不能假设它只来自官方加载器版本列表）。
+	if loaderName != "" {
+		safeLoader, whyL := SafeLoaderComponent(loaderName)
+		if whyL != nameRejectNone {
+			recordSecurityEvent(auditCategoryPrivateWrite, auditSeverityWarn, auditActionRejected,
+				"minecraft", "拒绝非法加载器名: "+describeNameReject(whyL))
+			return fmt.Errorf("加载器名称无效: %s", describeNameReject(whyL))
+		}
+		safeLoaderVer, whyV := SafeLoaderComponent(loaderVersion)
+		if whyV != nameRejectNone {
+			recordSecurityEvent(auditCategoryPrivateWrite, auditSeverityWarn, auditActionRejected,
+				"minecraft", "拒绝非法加载器版本: "+describeNameReject(whyV))
+			return fmt.Errorf("加载器版本无效: %s", describeNameReject(whyV))
+		}
+		loaderName, loaderVersion = safeLoader, safeLoaderVer
+	}
 	for _, item := range a.downloadList {
 		if item.CustomName == customName {
 			return fmt.Errorf("下载列表中已存在同名版本: %s", customName)
 		}
 	}
-
 	displayName := customName
 	if loaderName != "" {
 		displayName += " (" + loaderName + " " + loaderVersion + ")"
 	}
-
-	a.downloadList = append(a.downloadList, DownloadItem{
-		ID:             versionID,
-		URL:            versionURL,
-		CustomName:     displayName,
-		Type:           versionType,
-		ItemType:       "game+loader",
-		LoaderName:     loaderName,
-		LoaderVersion:  loaderVersion,
-		OptiFineType:   optifineType,
-		OptiFinePatch:  optifinePatch,
-		Status:         "pending",
-		Progress:       0,
-	})
-
+	// 拼接后的完整名也要过长度/单段校验（customName 合法但加上 loader 后缀可能超长）。
+	if finalName, whyD := SafeVersionDisplayName(displayName); whyD != nameRejectNone {
+		recordSecurityEvent(auditCategoryPrivateWrite, auditSeverityWarn, auditActionRejected,
+			"minecraft", "拒绝非法版本展示名: "+describeNameReject(whyD))
+		return fmt.Errorf("版本名称无效: %s", describeNameReject(whyD))
+	} else {
+		displayName = finalName
+	}
+	pending := DownloadItem{
+		ID: versionID, URL: versionURL, CustomName: displayName, Type: versionType,
+		ItemType: "game+loader", LoaderName: loaderName, LoaderVersion: loaderVersion,
+		OptiFineType: optifineType, OptiFinePatch: optifinePatch, Status: "pending", Progress: 0,
+	}
+	if why := auditDownloadItemForEnqueue(a.downloadList, pending); why != dqRejectNone {
+		return fmt.Errorf("%s", describeQueueReject(why))
+	}
+	if why := auditDownloadItemFields(pending, a.GetMinecraftDir()); why != dfRejectNone {
+		return fmt.Errorf("%s", describeDownloadFieldReject(why))
+	}
+	a.downloadList = append(a.downloadList, pending)
 	runtime.EventsEmit(a.ctx, "downloadListUpdated", a.downloadList)
 	return nil
 }
 
-// AddJavaToDownloadList 添加 Java 到下载列表
 func (a *App) AddJavaToDownloadList(majorVer int) error {
 	javaList := a.GetJavaDownloadList()
 	var target *JavaDownloadInfo
@@ -890,48 +638,40 @@ func (a *App) AddJavaToDownloadList(majorVer int) error {
 	if target == nil {
 		return fmt.Errorf("未找到 Java %d 的下载信息", majorVer)
 	}
-
+	if majorVer < 0 || majorVer > 99 {
+		return fmt.Errorf("Java 主版本号超出合理范围: %d", majorVer)
+	}
 	a.downloadMutex.Lock()
 	defer a.downloadMutex.Unlock()
-
 	customName := "Java " + fmt.Sprintf("%d", majorVer)
-	for _, item := range a.downloadList {
-		if item.CustomName == customName {
-			return fmt.Errorf("下载列表中已存在: %s", customName)
-		}
+	pending := DownloadItem{
+		ID: fmt.Sprintf("java-%d", majorVer), URL: target.URL, CustomName: customName,
+		Type: "java", ItemType: "java", JavaMajor: majorVer, Status: "pending", Progress: 0,
 	}
-
-	a.downloadList = append(a.downloadList, DownloadItem{
-		ID:         fmt.Sprintf("java-%d", majorVer),
-		URL:        target.URL,
-		CustomName: customName,
-		Type:       "java",
-		ItemType:   "java",
-		JavaMajor:  majorVer,
-		Status:     "pending",
-		Progress:   0,
-	})
-
+	if why := auditDownloadItemForEnqueue(a.downloadList, pending); why != dqRejectNone {
+		return fmt.Errorf("%s", describeQueueReject(why))
+	}
+	if why := auditDownloadItemFields(pending, a.GetMinecraftDir()); why != dfRejectNone {
+		return fmt.Errorf("%s", describeDownloadFieldReject(why))
+	}
+	a.downloadList = append(a.downloadList, pending)
 	runtime.EventsEmit(a.ctx, "downloadListUpdated", a.downloadList)
 	return nil
 }
 
-// RemoveFromDownloadList 从下载列表移除
 func (a *App) RemoveFromDownloadList(customName string) error {
 	a.downloadMutex.Lock()
 	defer a.downloadMutex.Unlock()
-
 	for i, item := range a.downloadList {
 		if item.CustomName == customName {
 			a.downloadList = append(a.downloadList[:i], a.downloadList[i+1:]...)
-			runtime.EventsEmit(a.ctx, "downloadListUpdated", a.downloadList)
+			runtime.EventsEmit(a.ctx, "downloadListUpdated", a.GetDownloadList())
 			return nil
 		}
 	}
 	return fmt.Errorf("未找到: %s", customName)
 }
 
-// GetDownloadList 获取下载列表
 func (a *App) GetDownloadList() []DownloadItem {
 	a.downloadMutex.Lock()
 	defer a.downloadMutex.Unlock()
@@ -940,72 +680,49 @@ func (a *App) GetDownloadList() []DownloadItem {
 	return result
 }
 
-// GetDownloadListCount 获取下载列表数量
 func (a *App) GetDownloadListCount() int {
 	a.downloadMutex.Lock()
 	defer a.downloadMutex.Unlock()
 	return len(a.downloadList)
 }
 
-// StartDownloadList 开始下载列表中的所有项目
-// 下载中的任何时刻都可以再次调用：若已在下载中则直接返回（运行中的循环会继续拾取 pending 项），
-// 只下载 pending 状态的项（失败/取消/已完成/下载中的都不会重复下载）
 func (a *App) StartDownloadList() error {
 	a.downloadMutex.Lock()
 	if a.isDownloading {
 		a.downloadMutex.Unlock()
-		return nil // 已在下载中，循环会自动处理剩余 pending 项
+		return fmt.Errorf("正在下载中，请等待当前下载完成")
 	}
 	if len(a.downloadList) == 0 {
 		a.downloadMutex.Unlock()
 		return fmt.Errorf("下载列表为空")
 	}
-	hasPending := false
-	for i := range a.downloadList {
-		if a.downloadList[i].Status == "pending" {
-			hasPending = true
-			break
+	// r35：开始下载前做“分目录磁盘余量预检”。按各 pending 条目的 SavePath 聚合已知
+	// 声明大小，逐卷探测剩余空间，任何目录写入会击穿 1GiB 安全水位就整体拒绝开始，
+	// 避免把盘写到耗尽。未知大小 / 探测失败一律不拦（没有证据不能误杀）。
+	demands := groupDownloadDiskDemand(a.downloadList)
+	plans := planDownloadDiskFit(demands, probeDownloadDiskFit)
+	if blocked := blockingDiskPlans(plans); len(blocked) > 0 {
+		for _, bp := range blocked {
+			recordSecurityEvent("download", auditSeverityCritical, auditActionBlocked,
+				"disk-space", describeDiskPlanBlock(bp))
 		}
-	}
-	if !hasPending {
 		a.downloadMutex.Unlock()
-		return fmt.Errorf("没有待下载的项目")
+		return fmt.Errorf("%s", describeDiskPlanBlock(blocked[0]))
 	}
 	a.isDownloading = true
 	a.downloadCancel = make(chan struct{})
 	a.downloadMutex.Unlock()
-
 	go func() {
 		defer func() {
-			// 捕获任何 panic，保证 isDownloading 一定复位、完成事件一定发出，
-			// 否则前端下载按钮会永久卡在"下载中"
-			if r := recover(); r != nil {
-				a.writeLog("下载列表处理发生崩溃: %v", r)
-				a.downloadMutex.Lock()
-				for i := range a.downloadList {
-					if a.downloadList[i].Status == "downloading" {
-						a.downloadList[i].Status = "failed"
-						a.downloadList[i].ErrorMsg = fmt.Sprintf("内部错误: %v", r)
-					}
-					if a.downloadList[i].Status == "pending" {
-						a.downloadList[i].Status = "cancelled"
-					}
-				}
-				a.downloadMutex.Unlock()
-			}
 			a.downloadMutex.Lock()
 			a.isDownloading = false
 			a.downloadCancel = nil
 			a.downloadMutex.Unlock()
-			runtime.EventsEmit(a.ctx, "downloadListUpdated", a.GetDownloadList())
 			runtime.EventsEmit(a.ctx, "downloadListCompleted")
 		}()
-
 		for {
-			// 检查是否取消
 			select {
 			case <-a.downloadCancel:
-				// 将所有 pending 状态重置（downloading 的保持不变）
 				a.downloadMutex.Lock()
 				for i := range a.downloadList {
 					if a.downloadList[i].Status == "pending" {
@@ -1017,7 +734,6 @@ func (a *App) StartDownloadList() error {
 				return
 			default:
 			}
-
 			a.downloadMutex.Lock()
 			var item *DownloadItem
 			idx := -1
@@ -1034,12 +750,8 @@ func (a *App) StartDownloadList() error {
 			}
 			a.downloadList[idx].Status = "downloading"
 			a.downloadMutex.Unlock()
-
 			runtime.EventsEmit(a.ctx, "downloadListUpdated", a.GetDownloadList())
-
 			var err error
-			// 每个项目重置进度映射为全区间（各函数内部会按阶段重新划分）
-			a.setProgressScale(0, 100)
 			if item.ItemType == "java" {
 				err = a.downloadJavaItem(item.JavaMajor, item.URL)
 			} else if item.ItemType == "mod" {
@@ -1049,13 +761,10 @@ func (a *App) StartDownloadList() error {
 			} else if item.ItemType == "modpack" {
 				err = a.installModpack(item)
 			} else if item.ItemType == "game+loader" {
-				// 原版下载占 0-65%，加载器安装占 65-95%，验证占 95-100%
 				a.emitProgress("downloading", "下载原版游戏 "+item.ID, 0, 0)
-				a.setProgressScale(0, 65)
 				if err = a.DownloadVersion(item.ID, item.URL, item.ID); err != nil {
 					err = fmt.Errorf("下载原版游戏失败: %v", err)
 				} else {
-					a.setProgressScale(65, 95)
 					a.emitProgress("downloading", "安装 "+item.LoaderName+" "+item.LoaderVersion, 0, 0)
 					switch item.LoaderName {
 					case "forge":
@@ -1074,28 +783,22 @@ func (a *App) StartDownloadList() error {
 			} else {
 				err = a.DownloadVersion(item.ID, item.URL, item.CustomName)
 			}
-
 			a.downloadMutex.Lock()
 			if err != nil {
 				a.downloadList[idx].Status = "failed"
 				a.downloadList[idx].Progress = 0
-				a.downloadList[idx].CurrentStep = ""
 				a.downloadList[idx].ErrorMsg = err.Error()
 			} else {
 				a.downloadList[idx].Status = "completed"
 				a.downloadList[idx].Progress = 100
-				a.downloadList[idx].CurrentStep = ""
 			}
 			a.downloadMutex.Unlock()
-
 			runtime.EventsEmit(a.ctx, "downloadListUpdated", a.GetDownloadList())
 		}
 	}()
-
 	return nil
 }
 
-// CancelDownloadList 取消下载列表中的剩余任务
 func (a *App) CancelDownloadList() error {
 	a.downloadMutex.Lock()
 	defer a.downloadMutex.Unlock()
@@ -1106,43 +809,25 @@ func (a *App) CancelDownloadList() error {
 	return nil
 }
 
-// downloadJavaItem 下载 Java：优先通过 Mojang 官方 java-runtime 清单下载免安装运行时
-// （参考 PCL，官方源 + BMCLAPI 镜像，32 线程并发，装到 <minecraftDir>/runtime/）；
-// 清单中没有该版本（如 Java 26）或下载失败时，回退到 Oracle 安装包
 func (a *App) downloadJavaItem(majorVer int, url string) error {
-	if err := a.downloadJavaRuntime(majorVer); err != nil {
-		a.writeLog("Mojang 运行时下载 Java %d 失败: %v，回退 Oracle 安装包", majorVer, err)
-		return a.downloadJavaOracleInstaller(majorVer, url)
+	target, why := auditJavaDownloadRequest(majorVer, url, a.GetJavaDownloadList())
+	if why != jdRejectNone {
+		recordSecurityEvent(auditCategoryInstaller, auditSeverityCritical, auditActionBlocked,
+			"minecraft", "Java 下载请求被拒绝: "+describeJavaDownloadReject(why))
+		return fmt.Errorf("Java 下载请求被拒绝: %s", describeJavaDownloadReject(why))
 	}
-	return nil
-}
-
-// downloadJavaOracleInstaller 回退方案：下载 Oracle 安装包并运行
-func (a *App) downloadJavaOracleInstaller(majorVer int, url string) error {
-	javaList := a.GetJavaDownloadList()
-	var target *JavaDownloadInfo
-	for i := range javaList {
-		if javaList[i].MajorVer == majorVer {
-			target = &javaList[i]
-			break
-		}
-	}
-	if target == nil {
-		return fmt.Errorf("未找到 Java %d 的下载信息", majorVer)
-	}
-
-	// 如果是网页链接（回退方案），用系统默认浏览器打开 Oracle 官方下载页
 	if target.IsWebPage {
-		webURL := target.URL
-		if webURL == "" {
-			webURL = url
+		// 交给系统浏览器前先过结构性校验：只允许 https 公网域名，拒绝危险 scheme、
+		// userinfo 混淆、内网/本机/裸 IP 与控制字符，避免 rundll32 打开到 file:/SSRF。
+		cmd, openErr := BrowserOpenCommand(url)
+		if openErr != nil {
+			recordSecurityEvent(auditCategoryExternalURL, auditSeverityWarn, auditActionRejected,
+				"minecraft", "拒绝打开不安全的 Java 下载页: "+openErr.Error())
+			return fmt.Errorf("Java 下载页链接不安全: %w", openErr)
 		}
-		cmd := exec.Command("cmd", "/c", "start", webURL)
 		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 		return cmd.Run()
 	}
-
-	// 下载到 %temp%
 	tempDir := os.Getenv("TEMP")
 	if tempDir == "" {
 		tempDir = os.Getenv("TMP")
@@ -1150,545 +835,332 @@ func (a *App) downloadJavaOracleInstaller(majorVer int, url string) error {
 	if tempDir == "" {
 		tempDir = filepath.Join(os.Getenv("USERPROFILE"), "AppData", "Local", "Temp")
 	}
-
-	destPath := filepath.Join(tempDir, target.FileName)
-
-	// 如果文件已存在，直接运行
-	if _, err := os.Stat(destPath); err == nil {
-		return runInstaller(destPath, target.IsMSI)
+	if strings.ContainsAny(target.FileName, `/\\`) || strings.HasPrefix(target.FileName, `..`) {
+		return fmt.Errorf(`不安全的 Java 安装文件名: %s`, target.FileName)
 	}
-
-	// 多线程分段下载安装包
+	destPath := filepath.Join(tempDir, target.FileName)
+	// %TEMP% 对同用户其它进程可写：不能看到同名文件就直接执行，否则恶意程序
+	// 预先放一个同名 msi/exe 就会被我们拉起。先清掉残留（符号链接只删链接
+	// 本身），本次下载的内容才是即将被校验执行的内容。发现残留本身值得审计：
+	// 正常首次下载时这里应该什么都没有。
+	if pre, statErr := os.Lstat(destPath); statErr == nil {
+		kind := "普通文件"
+		if pre.Mode()&os.ModeSymlink != 0 {
+			kind = "符号链接"
+		} else if !pre.Mode().IsRegular() {
+			kind = "特殊文件"
+		}
+		recordSecurityEvent(auditCategoryInstaller, auditSeverityCritical, auditActionBlocked,
+			"minecraft", "TEMP 中发现预置同名安装包("+kind+")，拒绝执行并清除: "+destPath)
+	}
+	if err := removeStaleInstaller(destPath); err != nil {
+		return fmt.Errorf("清理旧安装包失败: %v", err)
+	}
 	a.emitProgress("downloading", target.FileName, 0, 0)
-	if err := a.downloadFileMultiThread(url, destPath, 8); err != nil {
+	ctx, cancelReq := a.downloadContext()
+	defer cancelReq()
+	// 安装包与普通游戏文件走同一条安全通道：HTTPS 强制、声明/实际体积双校验、
+	// 临时文件流式落盘 + fsync + 原子 rename、503/网络抖动指数退避重试，
+	// 失败不会在 TEMP 留半截安装包。安装包紧接着要被执行，落盘后必须补
+	// Mark of the Web（ZoneId=3 Internet），让 SmartScreen 按互联网来源处置，
+	// 而不是把刚下载的文件当成本机原生文件。
+	opts := secureDownloadOptions{
+		MaxBytes:      maxJavaInstallerBytes,
+		Attempts:      3,
+		UserAgent:     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+		Client:        safeHTTPClient(),
+		MarkWebOrigin: true,
+		Progress: func(received, total int64) {
+			a.emitProgress("downloading", target.FileName, received, total)
+		},
+	}
+	if _, err := streamVerifiedDownload(ctx, target.URL, destPath, opts); err != nil {
+		if errors.Is(err, errSecureDownloadTooLarge) {
+			return fmt.Errorf("下载失败 %s: %w", target.URL, errDownloadTooLarge)
+		}
 		return fmt.Errorf("下载失败: %v", err)
 	}
-
-	// 下载完成，运行安装程序
 	return runInstaller(destPath, target.IsMSI)
 }
 
-// runInstaller 运行安装程序
 func runInstaller(filePath string, isMSI bool) error {
+	if err := validateInstallerPackage(filePath, isMSI); err != nil {
+		recordSecurityEvent(auditCategoryInstaller, auditSeverityCritical, auditActionBlocked,
+			"minecraft", "安装包执行前校验失败: "+err.Error())
+		return err
+	}
 	if isMSI {
 		cmd := exec.Command("msiexec", "/i", filePath)
 		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 		return cmd.Start()
 	}
-	cmd := exec.Command("cmd", "/c", "start", "", filePath)
+	cmd := exec.Command("explorer", filePath)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	return cmd.Start()
 }
 
 func (a *App) DownloadVersion(versionID string, versionURL string, customName string) error {
 	mcDir := a.getMinecraftDir()
+	// customName 既可能来自前端，也可能来自 .mrpack 清单里的 dependencies.minecraft
+	// （installModpack 原样透传到这里），属于外部输入，必须走严格名单段内核，防止
+	// 形如 "../../evil" / "CON" / "a\x00b" 的值把版本文件写到 versions 目录之外。
+	safeName, why := SafeVersionComponent(customName)
+	if why != nameRejectNone {
+		recordSecurityEvent(auditCategoryPrivateWrite, auditSeverityCritical, auditActionBlocked,
+			"minecraft", "拒绝非法版本目录名: "+describeNameReject(why))
+		return fmt.Errorf("无效的版本名称: %s", describeNameReject(why))
+	}
+	customName = safeName
 	versionDir := filepath.Join(mcDir, "versions", customName)
-
-	// 1. 创建版本目录
-	if err := os.MkdirAll(versionDir, 0755); err != nil {
+	if err := os.MkdirAll(versionDir, 0700); err != nil {
 		return fmt.Errorf("创建版本目录失败: %v", err)
 	}
-
-	// 2. 下载版本 JSON（使用 BMCLAPI 镜像）
 	a.emitProgress("downloading", customName+".json", 0, 0)
-	jsonURL := replaceWithBMCLAPI(versionURL)
+	jsonURL := rewriteLauncherURLToBMCL(versionURL)
 	jsonPath := filepath.Join(versionDir, customName+".json")
-	if err := a.downloadFile(jsonURL, jsonPath, false); err != nil {
+	if err := a.downloadFileBounded(jsonURL, jsonPath, false, maxMetadataJSONBytes); err != nil {
 		return fmt.Errorf("下载版本 JSON 失败: %v", err)
 	}
-
-	// 读取并解析版本 JSON
-	jsonData, err := os.ReadFile(jsonPath)
+	jsonData, err := readBoundedFile(jsonPath, maxMetadataJSONBytes)
 	if err != nil {
 		return fmt.Errorf("读取版本 JSON 失败: %v", err)
 	}
-
 	var versionJSON VersionJSON
 	if err := json.Unmarshal(jsonData, &versionJSON); err != nil {
 		return fmt.Errorf("解析版本 JSON 失败: %v", err)
 	}
-
-	// 3. 下载客户端 jar（多线程分段下载）
+	// 先把清单内 URL 归一化为真正发起请求时的地址（BMCLAPI 重写是确定性、受信任的），
+	// 白名单审计必须针对“实际抓取主机”，否则会误杀走 launcher.mojang.com 的老清单，
+	// 也避免攻击者靠“审计看 A、实际请求 B”的差异绕过。
+	if versionJSON.Downloads != nil {
+		if versionJSON.Downloads.Client != nil {
+			versionJSON.Downloads.Client.URL = rewriteLauncherURLToBMCL(versionJSON.Downloads.Client.URL)
+		}
+		if versionJSON.Downloads.Server != nil {
+			versionJSON.Downloads.Server.URL = rewriteLauncherURLToBMCL(versionJSON.Downloads.Server.URL)
+		}
+	}
+	for i := range versionJSON.Libraries {
+		dl := versionJSON.Libraries[i].Downloads
+		if dl == nil {
+			continue
+		}
+		if dl.Artifact != nil {
+			dl.Artifact.URL = rewriteLauncherURLToBMCL(dl.Artifact.URL)
+		}
+		for _, art := range dl.Classifiers {
+			if art != nil {
+				art.URL = rewriteLauncherURLToBMCL(art.URL)
+			}
+		}
+	}
+	if versionJSON.AssetIndex != nil {
+		versionJSON.AssetIndex.URL = rewriteLauncherURLToBMCL(versionJSON.AssetIndex.URL)
+	}
+	// 版本 JSON 来自可由前端指定的第三方 versionURL，client / library / native 的
+	// url/path/sha1 全部不受信任：下载主机必须落在官方 / 镜像白名单，可执行产物必须
+	// 带合法 SHA1，库路径必须是严格 Maven 相对路径，资源索引 ID 必须是单段安全名。
+	// critical 一律拒绝下载（防止攻击者把 jar 指向自己的服务器落进 classpath）。
+	manifestFindings := auditVersionManifest(&versionJSON)
+	for i := range manifestFindings {
+		f := &manifestFindings[i]
+		if f.Severity == manifestCritical {
+			recordSecurityEvent(auditCategoryExternalURL, auditSeverityCritical, auditActionBlocked,
+				"version-manifest", f.Field+": "+f.Detail)
+		} else {
+			recordSecurityEvent(auditCategoryExternalURL, auditSeverityWarn, auditActionDetected,
+				"version-manifest", f.Field+": "+f.Detail)
+		}
+	}
+	if manifestHasCritical(manifestFindings) {
+		return manifestCriticalError(manifestFindings)
+	}
 	if versionJSON.Downloads != nil && versionJSON.Downloads.Client != nil {
 		client := versionJSON.Downloads.Client
-		clientURL := replaceWithBMCLAPI(client.URL)
+		clientURL := rewriteLauncherURLToBMCL(client.URL)
 		jarPath := filepath.Join(versionDir, customName+".jar")
 		a.emitProgress("downloading", customName+".jar", 0, client.Size)
-		if err := a.downloadFileMultiThread(clientURL, jarPath, 8); err != nil {
+		if err := a.downloadVerifiedFile(clientURL, jarPath, client.SHA1, true); err != nil {
 			return fmt.Errorf("下载客户端 jar 失败: %v", err)
 		}
 	}
-
-	// 4. 并发下载库文件（包括 artifact 和 natives），与补全文件相同的并发模式
-	{
-		type libTask struct {
-			url  string
-			path string
+	a.emitProgress("downloading", "库文件", 0, 0)
+	for _, lib := range versionJSON.Libraries {
+		if lib.Downloads == nil {
+			continue
 		}
-		tasks := make([]libTask, 0)
-		for _, lib := range versionJSON.Libraries {
-			if lib.Downloads == nil {
+		if lib.Downloads.Artifact != nil {
+			artifact := lib.Downloads.Artifact
+			// Zip Slip 防护：库路径走严格 Maven 相对路径白名单（拒盘符/反斜杠/冒号）
+			safePath := SafeMavenRelPath(artifact.Path)
+			if safePath == "" {
+				fmt.Printf("跳过不安全的库路径: %s\n", artifact.Path)
 				continue
 			}
-			if lib.Downloads.Artifact != nil {
-				artifact := lib.Downloads.Artifact
-				libPath := filepath.Join(mcDir, "libraries", artifact.Path)
-				if info, err := os.Stat(libPath); err == nil && info.Size() > 0 {
-					continue // 已存在，跳过
-				}
-				tasks = append(tasks, libTask{url: replaceWithBMCLAPI(artifact.URL), path: libPath})
-			}
-			if lib.Natives != nil {
-				nativeKey, ok := lib.Natives["windows"]
-				if !ok {
-					continue
-				}
-				nativeKey = strings.ReplaceAll(nativeKey, "${arch}", "64")
-				if lib.Downloads.Classifiers == nil {
-					continue
-				}
-				classifier, ok := lib.Downloads.Classifiers[nativeKey]
-				if !ok || classifier == nil {
-					continue
-				}
-				nativePath := filepath.Join(mcDir, "libraries", classifier.Path)
-				if info, err := os.Stat(nativePath); err == nil && info.Size() > 0 {
-					continue
-				}
-				tasks = append(tasks, libTask{url: replaceWithBMCLAPI(classifier.URL), path: nativePath})
+			libPath := filepath.Join(mcDir, "libraries", filepath.FromSlash(safePath))
+			libURL := rewriteLauncherURLToBMCL(artifact.URL)
+			a.emitProgress("downloading", filepath.Base(artifact.Path), 0, artifact.Size)
+			if err := a.downloadVerifiedFile(libURL, libPath, artifact.SHA1, false); err != nil {
+				fmt.Printf("下载库文件失败(跳过): %s, %v\n", artifact.Path, err)
 			}
 		}
-
-		total := int64(len(tasks))
-		var (
-			wg        sync.WaitGroup
-			taskCh    = make(chan libTask)
-			doneCount int64
-			lastEmit  time.Time
-			emitMu    sync.Mutex
-		)
-		workers := 32
-		if workers > len(tasks) && len(tasks) > 0 {
-			workers = len(tasks)
-		}
-		if workers > 0 {
-			wg.Add(workers)
-			for w := 0; w < workers; w++ {
-				go func() {
-					defer wg.Done()
-					for task := range taskCh {
-						os.MkdirAll(filepath.Dir(task.path), 0755)
-						if err := a.downloadFile(task.url, task.path, false); err != nil {
-							fmt.Printf("下载库文件失败(跳过): %s, %v\n", filepath.Base(task.path), err)
-						}
-						done := atomic.AddInt64(&doneCount, 1)
-						emitMu.Lock()
-						if time.Since(lastEmit) > 300*time.Millisecond {
-							lastEmit = time.Now()
-							emitMu.Unlock()
-							a.emitProgress("downloading", fmt.Sprintf("库文件 %d/%d (%d%%)", done, total, done*100/total), done, total)
-							continue
-						}
-						emitMu.Unlock()
-					}
-				}()
+		if lib.Natives != nil {
+			// 仍只选择 Windows 系列分类器，但按真实架构挑选 windows-x86 /
+			// windows-64 / windows-arm64，并正确替换 ${arch}（旧实现恒为 "64"，
+			// 在 32 位 / ARM64 上会取错本地库）。
+			winEnv := ruleEnv{osName: "windows", osArch: currentRuleEnv().osArch}
+			nativeKey, ok := resolveWindowsNativeKey(lib.Natives, winEnv)
+			if !ok {
+				continue
 			}
-			for _, task := range tasks {
-				taskCh <- task
+			if lib.Downloads.Classifiers == nil {
+				continue
 			}
-			close(taskCh)
-			wg.Wait()
+			classifier, ok := lib.Downloads.Classifiers[nativeKey]
+			if !ok || classifier == nil {
+				continue
+			}
+			// Zip Slip 防护：native 路径走严格 Maven 相对路径白名单
+			safeClassPath := SafeMavenRelPath(classifier.Path)
+			if safeClassPath == "" {
+				fmt.Printf("跳过不安全的 native 路径: %s\n", classifier.Path)
+				continue
+			}
+			nativePath := filepath.Join(mcDir, "libraries", filepath.FromSlash(safeClassPath))
+			nativeURL := rewriteLauncherURLToBMCL(classifier.URL)
+			a.emitProgress("downloading", filepath.Base(classifier.Path), 0, classifier.Size)
+			if err := a.downloadVerifiedFile(nativeURL, nativePath, classifier.SHA1, false); err != nil {
+				fmt.Printf("下载 native 失败: %s, %v\n", classifier.Path, err)
+			}
 		}
 	}
-
-	// 5. 下载资源索引 + 并发下载资源文件
 	if versionJSON.AssetIndex != nil {
 		assetIndexRef := versionJSON.AssetIndex
+		// 资产索引 ID 来自外部版本 JSON，会直接拼进文件路径，必须强制为
+		// 单段安全名，防止 "1.21/../../x.json" 之类路径穿越或落到非预期位置。
+		safeIndexID := SafeSimpleName(assetIndexRef.ID)
+		if safeIndexID == "" {
+			return fmt.Errorf("资产索引 ID 不安全，拒绝继续: %q", assetIndexRef.ID)
+		}
 		assetIndexDir := filepath.Join(mcDir, "assets", "indexes")
-		assetIndexPath := filepath.Join(assetIndexDir, assetIndexRef.ID+".json")
-		assetIndexURL := replaceWithBMCLAPI(assetIndexRef.URL)
-
+		assetIndexPath := filepath.Join(assetIndexDir, safeIndexID+".json")
+		assetIndexURL := rewriteLauncherURLToBMCL(assetIndexRef.URL)
 		a.emitProgress("downloading", "资源索引", 0, 0)
-		if err := a.downloadFile(assetIndexURL, assetIndexPath, false); err != nil {
+		if err := a.downloadFileBounded(assetIndexURL, assetIndexPath, false, maxMetadataJSONBytes); err != nil {
 			fmt.Printf("下载资源索引失败: %v\n", err)
 		} else {
-			assetIndexData, err := os.ReadFile(assetIndexPath)
+			assetIndexData, err := readBoundedFile(assetIndexPath, maxMetadataJSONBytes)
 			if err == nil {
 				var assetIndex AssetIndex
 				if json.Unmarshal(assetIndexData, &assetIndex) == nil {
-					// 收集缺失的资源，32 线程并发下载
-					type assetTask struct {
-						url  string
-						path string
-					}
-					tasks := make([]assetTask, 0)
-					for _, obj := range assetIndex.Objects {
-						hash := obj.Hash
-						subHash := hash[:2]
-						assetPath := filepath.Join(mcDir, "assets", "objects", subHash, hash)
-						if info, err := os.Stat(assetPath); err == nil && info.Size() > 0 {
+					totalAssets := len(assetIndex.Objects)
+					count := 0
+					for name, obj := range assetIndex.Objects {
+						count++
+						// 对象哈希既拼下载 URL 也拼本地 objects/xx/<40hex> 路径，
+						// 且会做 hash[:2] 切片：必须严格是 40 位小写十六进制，
+						// 否则既可能路径穿越，也会因长度不足直接 panic 崩溃。
+						if !IsLowerHex(obj.Hash, 40) {
+							a.writeLog("跳过哈希非法的资源 %s: %q", name, obj.Hash)
 							continue
 						}
-						// 与补全文件相同的资源 URL 格式
-						assetURL := replaceWithBMCLAPI(fmt.Sprintf("https://resources.download.minecraft.net/%s/%s", subHash, hash))
-						tasks = append(tasks, assetTask{url: assetURL, path: assetPath})
-					}
-
-					total := int64(len(tasks))
-					var (
-						wg        sync.WaitGroup
-						taskCh    = make(chan assetTask)
-						doneCount int64
-						lastEmit  time.Time
-						emitMu    sync.Mutex
-					)
-					workers := 32
-					if workers > len(tasks) && len(tasks) > 0 {
-						workers = len(tasks)
-					}
-					if workers > 0 {
-						wg.Add(workers)
-						for w := 0; w < workers; w++ {
-							go func() {
-								defer wg.Done()
-								for task := range taskCh {
-									os.MkdirAll(filepath.Dir(task.path), 0755)
-									if derr := a.downloadFile(task.url, task.path, false); derr != nil {
-										fmt.Printf("下载资源失败(跳过): %s, %v\n", filepath.Base(task.path), derr)
-									}
-									done := atomic.AddInt64(&doneCount, 1)
-									emitMu.Lock()
-									if time.Since(lastEmit) > 300*time.Millisecond {
-										lastEmit = time.Now()
-										emitMu.Unlock()
-										a.emitProgress("downloading", fmt.Sprintf("资源 %d/%d (%d%%)", done, total, done*100/total), done, total)
-										continue
-									}
-									emitMu.Unlock()
-								}
-							}()
+						// 对象 key 会原样拼进下载 URL，拒绝穿越段 / 反斜杠 / 控制字符。
+						safeName, whyName := validateAssetObjectName(name)
+						if whyName != aoOK {
+							a.writeLog("跳过资源名非法的对象 %q: %s", name, describeAssetReject(whyName))
+							continue
 						}
-						for _, task := range tasks {
-							taskCh <- task
+						hash := obj.Hash
+						subHash := hash[:2]
+						assetURL := rewriteLauncherURLToBMCL(fmt.Sprintf("https://launcher.mojang.com/v1/objects/%s/%s", hash, safeName))
+						assetPath := filepath.Join(mcDir, "assets", "objects", subHash, hash)
+						a.emitProgress("downloading", fmt.Sprintf("资源 %d/%d", count, totalAssets), int64(count), int64(totalAssets))
+						if _, err := os.Stat(assetPath); os.IsNotExist(err) {
+							if derr := a.downloadFile(assetURL, assetPath, false); derr != nil {
+								fmt.Printf("下载资源失败(跳过): %s, %v\n", name, derr)
+							}
 						}
-						close(taskCh)
-						wg.Wait()
 					}
 				}
 			}
 		}
 	}
-
-	// 6. 解压 natives 到版本目录下的 natives 文件夹
 	a.emitProgress("extracting", "natives", 0, 0)
 	nativesDir := filepath.Join(versionDir, customName+"-natives")
-	if err := os.MkdirAll(nativesDir, 0755); err != nil {
+	if err := os.MkdirAll(nativesDir, 0700); err != nil {
 		return fmt.Errorf("创建 natives 目录失败: %v", err)
 	}
 	a.extractNativesFromJSON(mcDir, nativesDir, &versionJSON)
-
-	// 验证 natives 目录中是否有文件
 	nativesEntries, err := os.ReadDir(nativesDir)
 	if err == nil && len(nativesEntries) == 0 {
 		a.writeLog("警告: natives 目录为空，游戏可能无法启动")
 	}
-
 	a.emitProgress("completed", "", 100, 100)
 	return nil
 }
 
-// fixMissingLibraries 补全缺失的库文件（参考 PCL 的 DlClientFix + McLibFix）
-// 增强功能：SHA1 校验、多镜像源、assets 补全、natives 库补全
-func (a *App) fixMissingLibraries(mcDir string, versionJSON *VersionJSON) {
-	libsDir := filepath.Join(mcDir, "libraries")
-	missingCount := 0
-	downloadedCount := 0
-	hashFailCount := 0
-
-	// 预统计需要检查的库数量（用于进度百分比）
-	totalLibs := 0
-	for _, lib := range versionJSON.Libraries {
-		if a.shouldIncludeLib(lib) {
-			totalLibs++
-		}
-	}
-	processedLibs := 0
-	var lastLibEmit time.Time
-
-	for _, lib := range versionJSON.Libraries {
-		// 跳过不适用于当前平台的库
-		if !a.shouldIncludeLib(lib) {
-			continue
-		}
-
-		// 每 300ms 上报一次库文件检查进度（含百分比，避免用户以为卡死）
-		processedLibs++
-		if time.Since(lastLibEmit) > 300*time.Millisecond {
-			lastLibEmit = time.Now()
-			pct := 0
-			if totalLibs > 0 {
-				pct = processedLibs * 100 / totalLibs
-			}
-			a.emitFixProgress(fmt.Sprintf("补全文件 %d/%d (%d%%)", processedLibs, totalLibs, pct), int64(processedLibs), int64(totalLibs))
-		}
-
-		// 处理 natives 库：确保 native jar 文件存在
-		if lib.Natives != nil {
-			nativeKey, ok := lib.Natives["windows"]
-			if !ok {
-				continue
-			}
-			// 替换 ${arch} 占位符
-			nativeKey = strings.ReplaceAll(nativeKey, "${arch}", "64")
-
-			var nativePath string
-			var nativeURL string
-			var nativeSHA1 string
-
-			if lib.Downloads != nil && lib.Downloads.Classifiers != nil {
-				classifier, ok := lib.Downloads.Classifiers[nativeKey]
-				if ok && classifier != nil {
-					nativePath = filepath.Join(libsDir, classifier.Path)
-					nativeURL = classifier.URL
-					nativeSHA1 = classifier.SHA1
-				}
-			}
-
-			if nativePath == "" {
-				// 从 Maven 坐标推算路径
-				nativePath = mavenNameToPath(lib.Name+"-"+nativeKey, libsDir)
-			}
-
-			if nativePath == "" {
-				continue
-			}
-
-			// 检查 native jar 是否存在且校验通过
-			if a.checkFileHash(nativePath, nativeSHA1) {
-				continue
-			}
-
-			missingCount++
-
-			// 尝试下载 native jar
-			if nativeURL != "" {
-				urls := a.getMirrorURLs(nativeURL)
-				if a.downloadFromMirrors(urls, nativePath) {
-					downloadedCount++
-					a.writeLog("补全 native 库: %s", filepath.Base(nativePath))
-				} else {
-					a.writeLog("补全 native 库失败: %s", filepath.Base(nativePath))
-				}
-			}
-			continue
-		}
-
-		// 确定库文件路径、URL、SHA1
-		var libPath string
-		var downloadURL string
-		var expectedSHA1 string
-
-		if lib.Downloads != nil && lib.Downloads.Artifact != nil && lib.Downloads.Artifact.Path != "" {
-			libPath = filepath.Join(libsDir, lib.Downloads.Artifact.Path)
-			downloadURL = lib.Downloads.Artifact.URL
-			expectedSHA1 = lib.Downloads.Artifact.SHA1
-		} else if lib.JarPath != "" {
-			libPath = filepath.Join(libsDir, lib.JarPath)
-			downloadURL = lib.URL
-		} else if lib.Name != "" {
-			libPath = mavenNameToPath(lib.Name, libsDir)
-			downloadURL = ""
-		}
-
-		if libPath == "" {
-			continue
-		}
-
-		// 检查文件是否存在且 SHA1 校验通过（参考 PCL 的 FileChecker）
-		if a.checkFileHash(libPath, expectedSHA1) {
-			continue
-		}
-
-		// 文件不存在或 SHA1 不匹配
-		if _, err := os.Stat(libPath); err == nil && expectedSHA1 == "" {
-			continue // 文件存在且无 SHA1 要求，跳过
-		}
-
-		if _, err := os.Stat(libPath); err == nil && expectedSHA1 != "" {
-			hashFailCount++
-			a.writeLog("库文件 SHA1 校验失败，重新下载: %s", filepath.Base(libPath))
-		} else {
-			missingCount++
-		}
-
-		// 尝试下载
-		if downloadURL == "" {
-			// 没有 URL，尝试从 Maven 坐标构建 URL
-			downloadURL = mavenNameToURL(lib.Name)
-		}
-
-		if downloadURL == "" {
-			a.writeLog("库文件缺失且无下载地址: %s", libPath)
-			continue
-		}
-
-		// 获取多个镜像 URL（参考 PCL 的多源下载）
-		urls := a.getMirrorURLs(downloadURL)
-
-		// 删除损坏的文件
-		if _, err := os.Stat(libPath); err == nil {
-			os.Remove(libPath)
-		}
-
-		os.MkdirAll(filepath.Dir(libPath), 0755)
-		if a.downloadFromMirrors(urls, libPath) {
-			downloadedCount++
-			a.writeLog("补全库文件: %s", filepath.Base(libPath))
-		} else {
-			a.writeLog("补全库文件失败: %s", filepath.Base(libPath))
-		}
-	}
-
-	// 补全游戏主 jar（参考 PCL 的 DlClientJarGet）
-	jarName := versionJSON.Jar
-	if jarName == "" {
-		jarName = versionJSON.InheritsFrom
-	}
-	if jarName == "" {
-		jarName = versionJSON.ID
-	}
-	versionJar := filepath.Join(mcDir, "versions", jarName, jarName+".jar")
-	var jarSHA1 string
-	if versionJSON.Downloads != nil && versionJSON.Downloads.Client != nil {
-		jarSHA1 = versionJSON.Downloads.Client.SHA1
-	}
-
-	if !a.checkFileHash(versionJar, jarSHA1) {
-		if versionJSON.Downloads != nil && versionJSON.Downloads.Client != nil && versionJSON.Downloads.Client.URL != "" {
-			os.MkdirAll(filepath.Dir(versionJar), 0755)
-			url := versionJSON.Downloads.Client.URL
-			urls := a.getMirrorURLs(url)
-			// 替换特殊路径
-			for i, u := range urls {
-				urls[i] = strings.Replace(u, "https://launcher.mojang.com/v1/objects/", "https://bmclapi2.bangbang93.com/version/", 1)
-				urls[i] = strings.Replace(urls[i], "https://piston-data.mojang.com/v1/objects/", "https://bmclapi2.bangbang93.com/version/", 1)
-				urls[i] = strings.Replace(urls[i], "https://piston-meta.mojang.com/v1/objects/", "https://bmclapi2.bangbang93.com/version/", 1)
-			}
-			if a.downloadFromMirrors(urls, versionJar) {
-				downloadedCount++
-				a.writeLog("补全游戏 jar: %s", jarName)
-			} else {
-				a.writeLog("补全游戏 jar 失败: %s", jarName)
-			}
-		}
-	}
-
-	// 补全资源文件索引（参考 PCL 的 DlClientAssetIndexGet）
-	a.fixAssetsIndex(mcDir, versionJSON)
-
-	if missingCount > 0 || hashFailCount > 0 {
-		a.writeLog("库文件补全完成: 缺失 %d 个, SHA1 不匹配 %d 个, 成功下载 %d 个", missingCount, hashFailCount, downloadedCount)
-	}
-}
-
-// checkFileHash 检查文件是否存在且 SHA1 校验通过（参考 PCL 的 FileChecker.Check）
-// 如果 SHA1 为空，只检查文件是否存在
+// checkFileHash 校验文件完整性（SHA1，用于验证 Mojang manifest 提供的哈希）
 func (a *App) checkFileHash(filePath string, expectedSHA1 string) bool {
 	info, err := os.Stat(filePath)
 	if err != nil || info.Size() == 0 {
 		return false
 	}
-
 	if expectedSHA1 == "" {
-		return true // 无 SHA1 要求，文件存在即可
+		return true
 	}
-
-	// 计算 SHA1
 	f, err := os.Open(filePath)
 	if err != nil {
 		return false
 	}
 	defer f.Close()
-
 	h := sha1.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return false
 	}
-
-	actualSHA1 := fmt.Sprintf("%x", h.Sum(nil))
-	return strings.EqualFold(actualSHA1, expectedSHA1)
+	actualHash := fmt.Sprintf("%x", h.Sum(nil))
+	return actualHash == expectedSHA1
 }
 
-// getMirrorURLs 获取多个镜像下载 URL（参考 PCL 的多源下载策略）
-// 返回的 URL 列表按优先级排列：镜像源优先，官方源作为备用
 func (a *App) getMirrorURLs(originalURL string) []string {
 	var urls []string
-
-	// Forge Maven
-	if strings.Contains(originalURL, "maven.minecraftforge.net") {
-		mirrorURL := strings.Replace(originalURL, "https://maven.minecraftforge.net/", "https://bmclapi2.bangbang93.com/maven/", 1)
-		urls = append(urls, mirrorURL, originalURL)
-		return urls
+	addMirror := func(mirror, original string) {
+		urls = append(urls, mirror, original)
 	}
-
-	// NeoForge Maven
-	if strings.Contains(originalURL, "maven.neoforged.net") {
-		mirrorURL := strings.Replace(originalURL, "https://maven.neoforged.net/releases/", "https://bmclapi2.bangbang93.com/maven/", 1)
-		urls = append(urls, mirrorURL, originalURL)
-		return urls
+	switch {
+	case strings.Contains(originalURL, "maven.minecraftforge.net"):
+		addMirror(rewriteMavenLibURLToBMCL(originalURL), originalURL)
+	case strings.Contains(originalURL, "maven.neoforged.net"):
+		addMirror(rewriteMavenLibURLToBMCL(originalURL), originalURL)
+	case strings.Contains(originalURL, "maven.fabricmc.net"):
+		addMirror(rewriteMavenLibURLToBMCL(originalURL), originalURL)
+	case strings.Contains(originalURL, "libraries.minecraft.net"):
+		addMirror(rewriteLibraryArtifactURLToBMCL(originalURL), originalURL)
+	case strings.Contains(originalURL, "repo1.maven.org"):
+		addMirror(rewriteMavenCentralURLToBMCL(originalURL), originalURL)
+	case strings.Contains(originalURL, "launcher.mojang.com"), strings.Contains(originalURL, "piston-data.mojang.com"), strings.Contains(originalURL, "piston-meta.mojang.com"):
+		m := rewriteObjectVersionURLToBMCL(originalURL)
+		addMirror(m, originalURL)
+	case strings.Contains(originalURL, "resources.download.minecraft.net"):
+		addMirror(rewriteAssetURLToBMCL(originalURL), originalURL)
+	default:
+		urls = append(urls, originalURL)
 	}
-
-	// Fabric Maven
-	if strings.Contains(originalURL, "maven.fabricmc.net") {
-		mirrorURL := strings.Replace(originalURL, "https://maven.fabricmc.net/", "https://bmclapi2.bangbang93.com/maven/", 1)
-		urls = append(urls, mirrorURL, originalURL)
-		return urls
-	}
-
-	// Minecraft 官方库
-	if strings.Contains(originalURL, "libraries.minecraft.net") {
-		mirrorURL := strings.Replace(originalURL, "https://libraries.minecraft.net/", "https://bmclapi2.bangbang93.com/libraries/", 1)
-		urls = append(urls, mirrorURL, originalURL)
-		return urls
-	}
-
-	// Maven Central
-	if strings.Contains(originalURL, "repo1.maven.org") {
-		mirrorURL := strings.Replace(originalURL, "https://repo1.maven.org/maven2/", "https://bmclapi2.bangbang93.com/maven/", 1)
-		urls = append(urls, mirrorURL, originalURL)
-		return urls
-	}
-
-	// Mojang 资源
-	if strings.Contains(originalURL, "launcher.mojang.com") || strings.Contains(originalURL, "piston-data.mojang.com") || strings.Contains(originalURL, "piston-meta.mojang.com") {
-		mirrorURL := strings.Replace(originalURL, "https://launcher.mojang.com/v1/objects/", "https://bmclapi2.bangbang93.com/version/", 1)
-		mirrorURL = strings.Replace(mirrorURL, "https://piston-data.mojang.com/v1/objects/", "https://bmclapi2.bangbang93.com/version/", 1)
-		mirrorURL = strings.Replace(mirrorURL, "https://piston-meta.mojang.com/v1/objects/", "https://bmclapi2.bangbang93.com/version/", 1)
-		urls = append(urls, mirrorURL, originalURL)
-		return urls
-	}
-
-	// 资源文件
-	if strings.Contains(originalURL, "resources.download.minecraft.net") {
-		mirrorURL := strings.Replace(originalURL, "https://resources.download.minecraft.net/", "https://bmclapi2.bangbang93.com/assets/", 1)
-		urls = append(urls, mirrorURL, originalURL)
-		return urls
-	}
-
-	// 默认：原 URL
-	urls = append(urls, originalURL)
 	return urls
 }
 
-// downloadFromMirrors 从多个镜像源尝试下载（参考 PCL 的多源下载策略）
-func (a *App) downloadFromMirrors(urls []string, destPath string) bool {
-	for _, url := range urls {
-		// 删除可能存在的损坏文件
+func (a *App) downloadFromMirrors(urls []string, destPath string, maxBytes int64) bool {
+	for attempt, url := range urls {
 		os.Remove(destPath)
-		os.MkdirAll(filepath.Dir(destPath), 0755)
-
-		if err := a.downloadFile(url, destPath, false); err != nil {
+		if err := a.downloadFileBounded(url, destPath, false, maxBytes); err != nil {
 			a.writeLog("下载失败 [%s]: %v", url, err)
+			// 切下一个镜像前做一次可中断的退避（mt_xor25 抖动 ±25%），
+			// 既避免失败后瞬间重试压垮镜像，也让多实例不会同步重试；取消下载立即返回。
+			if attempt+1 < len(urls) {
+				base := time.Duration(attempt+1) * 500 * time.Millisecond
+				if !a.sleepOrCancel(mtXor25Jitter(base)) {
+					return false
+				}
+			}
 			continue
 		}
 		return true
@@ -1696,287 +1168,229 @@ func (a *App) downloadFromMirrors(urls []string, destPath string) bool {
 	return false
 }
 
-// fixAssetsIndex 补全资源文件索引（参考 PCL 的 DlClientAssetIndexGet）
+// sleepOrCancel 休眠 d，期间若下载列表被取消则立即返回 false；正常到点返回 true。
+func (a *App) sleepOrCancel(d time.Duration) bool {
+	a.downloadMutex.Lock()
+	ch := a.downloadCancel
+	a.downloadMutex.Unlock()
+	if ch == nil {
+		time.Sleep(d)
+		return true
+	}
+	select {
+	case <-ch:
+		return false
+	case <-time.After(d):
+		return true
+	}
+}
+
 func (a *App) fixAssetsIndex(mcDir string, versionJSON *VersionJSON) {
 	if versionJSON.AssetIndex == nil || versionJSON.AssetIndex.URL == "" {
 		return
 	}
-
-	// 资源索引文件路径
-	assetIndexDir := filepath.Join(mcDir, "assets", "indexes")
-	assetIndexPath := filepath.Join(assetIndexDir, versionJSON.AssetIndex.ID+".json")
-
-	// 检查索引文件是否存在
-	if _, err := os.Stat(assetIndexPath); err == nil {
-		// 索引文件已存在，仍需校验资源本体完整性（参考 PCL：每次启动都会跑一遍资源校验）
-		// 之前索引存在就直接 return，导致下载不完整的资源永远不会被补全
-		a.fixMissingAssets(mcDir, assetIndexPath)
+	// AssetIndex.ID 来自不可信版本 JSON，会拼成 indexes/<id>.json 落盘路径，
+	// 必须和 DownloadVersion 主路径一样过单段安全名校验，拒绝 "../" 等穿越名。
+	safeID := SafeSimpleName(versionJSON.AssetIndex.ID)
+	if safeID == "" {
+		a.writeLog("资源索引 ID 不安全，拒绝补全: %q", versionJSON.AssetIndex.ID)
+		recordSecurityEvent("asset", "high", "reject-asset-index-id", "fixAssetsIndex", versionJSON.AssetIndex.ID)
 		return
 	}
-
-	a.writeLog("资源索引文件缺失，正在下载: %s", versionJSON.AssetIndex.ID)
-
-	os.MkdirAll(assetIndexDir, 0755)
-
-	url := versionJSON.AssetIndex.URL
-	urls := a.getMirrorURLs(url)
-	// 替换特殊路径
-	for i, u := range urls {
-		urls[i] = strings.Replace(u, "https://piston-meta.mojang.com/", "https://bmclapi2.bangbang93.com/", 1)
-		urls[i] = strings.Replace(urls[i], "https://launcher.mojang.com/", "https://bmclapi2.bangbang93.com/", 1)
+	assetIndexDir := filepath.Join(mcDir, "assets", "indexes")
+	assetIndexPath := filepath.Join(assetIndexDir, safeID+".json")
+	if _, err := os.Stat(assetIndexPath); err == nil {
+		return
 	}
-
-	if a.downloadFromMirrors(urls, assetIndexPath) {
-		a.writeLog("资源索引文件下载完成: %s", versionJSON.AssetIndex.ID)
-
-		// 解析索引文件，补全缺失的资源文件（参考 PCL 的 McAssetsFixList）
+	a.writeLog("资源索引文件缺失，正在下载: %s", safeID)
+	// 目标目录由 downloadFromMirrors→downloadFileBounded 统一以 0700 创建/收权，无需预建。
+	urls := a.getMirrorURLs(versionJSON.AssetIndex.URL)
+	for i, u := range urls {
+		urls[i] = rewriteMetaIndexURLToBMCL(u)
+	}
+	if a.downloadFromMirrors(urls, assetIndexPath, maxMetadataJSONBytes) {
+		a.writeLog("资源索引文件下载完成: %s", safeID)
 		a.fixMissingAssets(mcDir, assetIndexPath)
 	} else {
-		a.writeLog("资源索引文件下载失败: %s", versionJSON.AssetIndex.ID)
+		a.writeLog("资源索引文件下载失败: %s", safeID)
 	}
 }
 
-// fixMissingAssets 补全缺失的资源文件（参考 PCL 的 McAssetsFixList）
 func (a *App) fixMissingAssets(mcDir string, assetIndexPath string) {
-	data, err := os.ReadFile(assetIndexPath)
+	data, err := readBoundedFile(assetIndexPath, maxMetadataJSONBytes)
 	if err != nil {
 		return
 	}
-
 	var index AssetIndex
 	if err := json.Unmarshal(data, &index); err != nil {
 		return
 	}
-
-	objectsDir := filepath.Join(mcDir, "assets", "objects")
-	var missingCount, downloadedCount, hashFailCount int64
-	totalObjects := len(index.Objects)
-	checkedCount := 0
-	lastEmit := time.Time{}
-
-	// ===== 阶段 1：快速扫描（纯文件大小校验，不联网），收集缺失列表 =====
-	// 参考 PCL：启动时只查 Size 不算哈希，缺失文件收集后统一并发下载
-	type assetTask struct {
-		urls    []string
-		objPath string
-		size    int64
+	// 统一走 assetguard：哈希严格 40 位小写 hex、对象名相对路径校验、条数与大小收口。
+	// 历史上这里只判 hash != "" 就 obj.Hash[:2]，短哈希会越界 panic，畸形哈希还能让
+	// Join 出的落盘路径逃出 objects 目录（远程 DoS / 路径穿越写）。
+	safeObjects, rejects, why := auditAssetObjects(index.Objects)
+	if why == aoIndexTooMany {
+		a.writeLog("资产索引对象条数超过上限 %d，拒绝补全", maxAssetIndexObjects)
+		recordSecurityEvent("asset", "high", "reject-asset-index-too-many", "fixMissingAssets",
+			fmt.Sprintf("objects=%d limit=%d", len(index.Objects), maxAssetIndexObjects))
+		return
 	}
-	tasks := make([]assetTask, 0)
-
-	for _, obj := range index.Objects {
-		if obj.Hash == "" {
+	if n := rejects[aoHashBad]; n > 0 {
+		recordSecurityEvent("asset", "high", "reject-bad-asset-hash", "fixMissingAssets",
+			fmt.Sprintf("count=%d", n))
+	}
+	objectsDir := filepath.Join(mcDir, "assets", "objects")
+	missingCount, downloadedCount := 0, 0
+	total := len(safeObjects)
+	for i, obj := range safeObjects {
+		sub, objPath, ok := planAssetObjectDest(objectsDir, obj.Hash)
+		if !ok {
 			continue
 		}
-
-		// 资源文件路径: assets/objects/{hash前2位}/{hash}
-		objPath := filepath.Join(objectsDir, obj.Hash[:2], obj.Hash)
-
-		needDownload := false
-		info, err := os.Stat(objPath)
-		if err != nil || info.Size() == 0 {
-			needDownload = true
-			missingCount++
-		} else if obj.Size > 0 && info.Size() != obj.Size {
-			// 文件大小与索引不符 → 下载不完整/损坏，删除重下
-			// （参考 PCL 的资源校验：按 Size 校验，比逐个算 SHA1 快得多）
-			needDownload = true
-			hashFailCount++
-			os.Remove(objPath)
+		if _, err := os.Stat(objPath); err == nil {
+			continue
 		}
-
-		// 每 300ms 上报一次扫描进度（含百分比）
-		checkedCount++
-		if time.Since(lastEmit) > 300*time.Millisecond {
-			lastEmit = time.Now()
-			pct := 0
-			if totalObjects > 0 {
-				pct = checkedCount * 100 / totalObjects
-			}
-			a.emitFixProgress(fmt.Sprintf("校验资源 %d/%d (%d%%)", checkedCount, totalObjects, pct), int64(checkedCount), int64(totalObjects))
-		}
-
-		if needDownload {
-			// 下载 URL（参考 PCL 的 DlSourceAssetsGet）
-			originalURL := fmt.Sprintf("https://resources.download.minecraft.net/%s/%s", obj.Hash[:2], obj.Hash)
-			tasks = append(tasks, assetTask{urls: a.getMirrorURLs(originalURL), objPath: objPath, size: obj.Size})
+		missingCount++
+		originalURL := fmt.Sprintf("https://resources.download.minecraft.net/%s/%s", sub, obj.Hash)
+		urls := a.getMirrorURLs(originalURL)
+		a.emitProgress("downloading", fmt.Sprintf("补全资源 %d/%d", i+1, total), int64(i+1), int64(total))
+		// objPath 的父目录由 downloadFromMirrors 内部统一按 0700 创建/收权。
+		if a.downloadFromMirrors(urls, objPath, maxAssetObjectBytes) {
+			downloadedCount++
 		}
 	}
-
-	// ===== 阶段 2：并发下载缺失资源（PCL 用几十线程并行，串行逐个下载会慢几十倍）=====
-	if len(tasks) > 0 {
-		const workers = 32
-		var (
-			wg           sync.WaitGroup
-			taskCh       = make(chan assetTask)
-			doneCount    int64
-			failCount    int64
-			lastDlEmit   time.Time
-			emitMu       sync.Mutex
-		)
-		wg.Add(workers)
-		for w := 0; w < workers; w++ {
-			go func() {
-				defer wg.Done()
-				for task := range taskCh {
-					os.MkdirAll(filepath.Dir(task.objPath), 0755)
-					if a.downloadFromMirrors(task.urls, task.objPath) {
-						atomic.AddInt64(&downloadedCount, 1)
-						// 下载后校验大小，失败说明下载不完整
-						if info, err := os.Stat(task.objPath); err != nil || (task.size > 0 && info.Size() != task.size) {
-							os.Remove(task.objPath)
-							a.writeLog("资源文件下载后校验失败: %s", filepath.Base(task.objPath))
-						}
-					} else {
-						atomic.AddInt64(&failCount, 1)
-					}
-					done := atomic.AddInt64(&doneCount, 1)
-					// 上报下载进度（加锁避免时间戳竞争）
-					emitMu.Lock()
-					if time.Since(lastDlEmit) > 300*time.Millisecond {
-						lastDlEmit = time.Now()
-						emitMu.Unlock()
-						pct := int(done) * 100 / len(tasks)
-						a.emitFixProgress(fmt.Sprintf("下载资源 %d/%d (%d%%)", done, len(tasks), pct), done, int64(len(tasks)))
-						continue
-					}
-					emitMu.Unlock()
-				}
-			}()
+	if len(rejects) > 0 {
+		rejectedTotal := 0
+		for _, n := range rejects {
+			rejectedTotal += n
 		}
-		for _, task := range tasks {
-			taskCh <- task
-		}
-		close(taskCh)
-		wg.Wait()
-
-		if failCount > 0 {
-			a.writeLog("资源文件并发下载: %d 个失败", failCount)
-		}
+		a.writeLog("资产索引存在 %d 个非法对象，已跳过", rejectedTotal)
 	}
-
-	if missingCount > 0 || hashFailCount > 0 {
-		a.writeLog("资源文件补全: 缺失 %d 个, 大小不匹配 %d 个, 成功下载 %d 个", missingCount, hashFailCount, downloadedCount)
-		a.emitFixProgress(fmt.Sprintf("资源补全完成 (补下 %d 个)", downloadedCount), 0, 0)
+	if missingCount > 0 {
+		a.writeLog("资源文件补全: 缺失 %d 个, 成功下载 %d 个", missingCount, downloadedCount)
 	}
 }
 
-// mavenNameToURL 从 Maven 坐标推算下载 URL
 func mavenNameToURL(name string) string {
 	parts := strings.Split(name, ":")
 	if len(parts) < 3 {
 		return ""
 	}
-
 	group := strings.ReplaceAll(parts[0], ".", "/")
-	artifact := parts[1]
-	version := parts[2]
+	artifact, version := parts[1], parts[2]
 	classifier := ""
 	if len(parts) >= 4 {
 		classifier = "-" + parts[3]
 	}
-
-	fileName := fmt.Sprintf("%s-%s%s.jar", artifact, version, classifier)
-	return fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s", group, artifact, version, fileName)
+	return fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s%s.jar", group, artifact, version, artifact, version, classifier)
 }
 
-// extractNatives 从 jar 中提取 dll/jnilib/so 文件到目标目录
-// 返回提取的文件数量
-// 增强：处理损坏的 jar 文件、清理多余文件（参考 PCL 的 McLaunchNatives）
+// 单个 / 全部 native 条目解压后的体积上限。
+// 正常的 .dll / .so / .jnilib 远小于这些值，上限只在“异常压缩包 / zip 炸弹”时触发，
+// 避免一个恶意 natives jar 借超大条目或高压缩比把磁盘写满。
+const (
+	maxNativeEntryBytes int64 = 256 << 20 // 256 MiB / 单个 native
+	maxNativeTotalBytes int64 = 2 << 30   // 2 GiB / 单次解压总量
+)
+
 func extractNatives(jarPath string, destDir string) (int, error) {
+	return extractNativesWithLimits(jarPath, destDir, maxNativeEntryBytes, maxNativeTotalBytes)
+}
+
+// extractNativesWithLimits 是真正的解压内核，单文件 / 总量上限由调用方传入，
+// 既让生产路径用固定安全常量，也便于用小阈值对体积边界做轻量单测（不必造几百 MiB 数据）。
+func extractNativesWithLimits(jarPath string, destDir string, entryMax, totalMax int64) (int, error) {
 	r, err := zip.OpenReader(jarPath)
 	if err != nil {
-		// 损坏的 jar 文件，删除它（参考 PCL：删除损坏的 Natives 文件）
 		os.Remove(jarPath)
 		return 0, fmt.Errorf("打开 Natives 文件失败（文件可能已损坏）: %s", jarPath)
 	}
 	defer r.Close()
-
 	count := 0
-	var extractedFiles []string // 记录本次提取的文件名，用于清理多余文件
-
+	var total int64
 	for _, f := range r.File {
-		// 跳过目录和 META-INF
-		if f.FileInfo().IsDir() {
+		if f.FileInfo().IsDir() || strings.HasPrefix(f.Name, "META-INF/") {
 			continue
 		}
-		if strings.HasPrefix(f.Name, "META-INF/") {
+		// 符号链接 / 设备等特殊条目绝不落地，即便伪装成 .dll 后缀。
+		if f.Mode()&(os.ModeSymlink|os.ModeDevice|os.ModeNamedPipe|os.ModeSocket) != 0 {
 			continue
 		}
-
-		// 只提取 .dll, .jnilib, .so 文件
 		lowerName := strings.ToLower(f.Name)
-		if !strings.HasSuffix(lowerName, ".dll") &&
-			!strings.HasSuffix(lowerName, ".jnilib") &&
-			!strings.HasSuffix(lowerName, ".so") {
+		if !strings.HasSuffix(lowerName, ".dll") && !strings.HasSuffix(lowerName, ".jnilib") && !strings.HasSuffix(lowerName, ".so") {
 			continue
 		}
-
+		// zip 头里声明的解压体积可先廉价挡一刀；真正的边界仍靠 LimitReader，不信任该值。
+		if f.UncompressedSize64 > uint64(entryMax) {
+			return count, fmt.Errorf("native 条目 %s 声明体积超过单文件上限", f.Name)
+		}
+		if total >= totalMax || total+int64(f.UncompressedSize64) > totalMax {
+			return count, fmt.Errorf("native 解压总量超过 %d 字节上限，疑似 zip 炸弹", totalMax)
+		}
+		fileName := filepath.Base(f.Name)
+		destPath := filepath.Join(destDir, fileName)
+		if info, err := os.Stat(destPath); err == nil && info.Size() == f.FileInfo().Size() {
+			count++
+			continue
+		}
 		rc, err := f.Open()
 		if err != nil {
 			continue
 		}
-
-		fileName := filepath.Base(f.Name)
-		destPath := filepath.Join(destDir, fileName)
-		extractedFiles = append(extractedFiles, destPath)
-
-		// 如果文件已存在且大小相同，跳过（参考PCL）
-		if info, err := os.Stat(destPath); err == nil && info.Size() == f.FileInfo().Size() {
+		if err := os.MkdirAll(destDir, 0700); err != nil {
 			rc.Close()
-			count++
-			continue
+			return count, fmt.Errorf("创建 natives 目录失败: %v", err)
 		}
-
-		// 文件存在但大小不同，删除旧文件（参考 PCL）
-		if _, err := os.Stat(destPath); err == nil {
-			os.Remove(destPath)
-		}
-
-		out, err := os.Create(destPath)
+		// 先写到同目录临时文件，完整通过体积校验后再原子替换，避免留下半截大文件。
+		tmp, err := os.CreateTemp(destDir, ".native-*.tmp")
 		if err != nil {
 			rc.Close()
 			continue
 		}
-
-		_, err = io.Copy(out, rc)
-		out.Close()
+		tmpName := tmp.Name()
+		limited := io.LimitReader(rc, entryMax+1)
+		n, copyErr := io.Copy(tmp, limited)
+		tmp.Close()
 		rc.Close()
-		if err != nil {
+		if copyErr != nil {
+			os.Remove(tmpName)
 			continue
 		}
+		if n > entryMax || total+n > totalMax {
+			os.Remove(tmpName)
+			if n > entryMax {
+				return count, fmt.Errorf("native 条目 %s 解压后超过单文件上限", fileName)
+			}
+			return count, fmt.Errorf("native 解压总量超过 %d 字节上限，疑似 zip 炸弹", totalMax)
+		}
+		if err := os.Chmod(tmpName, 0600); err != nil {
+			os.Remove(tmpName)
+			continue
+		}
+		if err := os.Rename(tmpName, destPath); err != nil {
+			os.Remove(tmpName)
+			continue
+		}
+		total += n
 		count++
 	}
-
 	return count, nil
 }
 
-// extractNativesFromJSON 从版本 JSON 的 libraries 中提取 natives
-// 增强：支持 natives-windows-64 键、处理损坏的 jar（参考 PCL 的 McLaunchNatives）
 func (a *App) extractNativesFromJSON(mcDir string, nativesDir string, versionJSON *VersionJSON) {
-	// 确保 natives 目录存在
-	os.MkdirAll(nativesDir, 0755)
-
-	// 记录所有提取的文件路径，用于清理多余文件（参考 PCL）
-	var allExtractedFiles []string
-
+	// 解压根目录统一收权到 0700（历史上若存在 0755 的 natives 目录会被原样沿用）。
+	_ = ensurePrivateDir(nativesDir)
 	for _, lib := range versionJSON.Libraries {
 		if lib.Natives == nil {
 			continue
 		}
-
-		// 尝试多个 native 键（参考 PCL 的 McLibListGetWithJson）
-		// 优先级: natives-windows-64 > natives-windows
-		nativeKey := ""
-		if key, ok := lib.Natives["windows-64"]; ok {
-			nativeKey = strings.ReplaceAll(key, "${arch}", "64")
-		} else if key, ok := lib.Natives["windows"]; ok {
-			nativeKey = strings.ReplaceAll(key, "${arch}", "64")
-		}
-
-		if nativeKey == "" {
+		// 与下载阶段使用同一套“按真实架构选 Windows natives 键 + ${arch} 替换”
+		// 的规则，避免下载和解压挑到不同分类器（旧实现这里只看 windows-64/windows）。
+		winEnv := ruleEnv{osName: "windows", osArch: currentRuleEnv().osArch}
+		nativeKey, hasNative := resolveWindowsNativeKey(lib.Natives, winEnv)
+		if !hasNative {
 			continue
 		}
-
 		if lib.Downloads == nil || lib.Downloads.Classifiers == nil {
 			continue
 		}
@@ -1984,14 +1398,18 @@ func (a *App) extractNativesFromJSON(mcDir string, nativesDir string, versionJSO
 		if !ok || classifier == nil {
 			continue
 		}
-		nativeJarPath := filepath.Join(mcDir, "libraries", classifier.Path)
-
-		// 检查 native jar 是否存在
+		// 与下载阶段一致，这里必须再次校验 classifier.Path：版本 JSON 来自镜像
+		// 站（不可信），而本函数也会被非 DownloadVersion 的其它启动流程调用。
+		safeClassifierPath := isSafeRelPath(classifier.Path)
+		if safeClassifierPath == "" {
+			a.writeLog("跳过不安全的 native jar 路径: %s", classifier.Path)
+			continue
+		}
+		nativeJarPath := filepath.Join(mcDir, "libraries", safeClassifierPath)
 		if _, err := os.Stat(nativeJarPath); os.IsNotExist(err) {
 			a.writeLog("native jar 不存在(跳过): %s", nativeJarPath)
 			continue
 		}
-
 		extracted, err := extractNatives(nativeJarPath, nativesDir)
 		if err != nil {
 			a.writeLog("解压 native 失败: %s, %v", classifier.Path, err)
@@ -1999,13 +1417,8 @@ func (a *App) extractNativesFromJSON(mcDir string, nativesDir string, versionJSO
 			a.writeLog("解压 native: %s -> %d 个文件", classifier.Path, extracted)
 		}
 	}
-
-	// 清理 natives 目录中的多余文件（参考 PCL 的 McLaunchNatives）
-	// 如果 allExtractedFiles 非空，删除不在列表中的 .dll/.so/.jnilib 文件
-	_ = allExtractedFiles // 暂时不清理，避免误删（PCL 也有此保护逻辑）
 }
 
-// isDirEmpty 检查目录是否为空
 func isDirEmpty(dir string) (bool, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -2014,17 +1427,8 @@ func isDirEmpty(dir string) (bool, error) {
 	return len(entries) == 0, nil
 }
 
-// setGameLanguage 设置游戏语言为中文（参考 PCL 的 options.txt 修改逻辑）
-// 修改游戏目录下的 options.txt 中的 lang 字段
-// MC 版本语言格式：
-//   1.1~1.5: zh_CN（最后两位必须大写，否则崩溃）
-//   1.6~1.10: zh_CN（zh_cn 会自动切换为英文）
-//   1.11~1.12: zh_cn（zh_CN 虽然显示中文但语言设置会错误显示英文）
-//   1.13+: zh_cn（zh_CN 会自动切换为英文）
 func (a *App) setGameLanguage(gameDir string, versionID string) {
 	optionsPath := filepath.Join(gameDir, "options.txt")
-
-	// 提取 MC 主版本号
 	mcCodeMain := 0
 	parts := strings.Split(versionID, "-")
 	if len(parts) > 0 {
@@ -2035,15 +1439,10 @@ func (a *App) setGameLanguage(gameDir string, versionID string) {
 			}
 		}
 	}
-
-	// 确定语言代码
 	requiredLang := "zh_cn"
 	if mcCodeMain > 0 && mcCodeMain < 12 {
-		// 1.1~1.11 需要大写后缀
 		requiredLang = "zh_CN"
 	}
-
-	// 检查 Yosbr Mod 兼容
 	if _, err := os.Stat(optionsPath); os.IsNotExist(err) {
 		yosbrPath := filepath.Join(gameDir, "config", "yosbr", "options.txt")
 		if _, err2 := os.Stat(yosbrPath); err2 == nil {
@@ -2051,29 +1450,29 @@ func (a *App) setGameLanguage(gameDir string, versionID string) {
 			a.writeLog("检测到 Yosbr Mod，修改其 options.txt")
 		}
 	}
-
-	// 读取 options.txt
-	data, err := os.ReadFile(optionsPath)
+	data, err := readBoundedFile(optionsPath, localTextConfigMaxBytes)
 	if err != nil {
-		// 文件不存在，创建新的
+		if errors.Is(err, errLocalFileTooLarge) {
+			// 异常巨大的 options.txt：绝不能走下面“创建默认文件”的分支把它截断覆盖，
+			// 直接跳过本次语言设置，保留用户原文件。
+			a.writeLog("options.txt 异常过大，跳过语言设置以免破坏文件: %v", err)
+			recordSecurityEvent("local-config", auditSeverityWarn, auditActionBlocked,
+				"minecraft", "options.txt 超过有界读取上限，已跳过语言改写")
+			return
+		}
 		content := fmt.Sprintf("lang:%s\n", requiredLang)
-		if err := os.WriteFile(optionsPath, []byte(content), 0644); err != nil {
+		if err := secureWritePrivateFile(optionsPath, []byte(content)); err != nil {
 			a.writeLog("创建 options.txt 失败: %v", err)
 		} else {
 			a.writeLog("已创建 options.txt，设置语言为 %s", requiredLang)
 		}
 		return
 	}
-
-	// 解析并修改 lang 字段
 	lines := strings.Split(string(data), "\n")
-	found := false
-	hasSaves := false
-	// 检查是否有存档目录（有存档说明不是首次启动，不强制修改语言）
+	found, hasSaves := false, false
 	if info, err := os.Stat(filepath.Join(gameDir, "saves")); err == nil && info.IsDir() {
 		hasSaves = true
 	}
-
 	for i, line := range lines {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "lang:") {
@@ -2082,7 +1481,6 @@ func (a *App) setGameLanguage(gameDir string, versionID string) {
 				a.writeLog("游戏语言已为 %s，无需修改", requiredLang)
 				return
 			}
-			// 如果有存档，不强制修改用户已有的语言设置
 			if hasSaves && currentLang != "" && currentLang != "none" {
 				a.writeLog("检测到已有存档，保留用户语言设置: %s", currentLang)
 				return
@@ -2092,36 +1490,29 @@ func (a *App) setGameLanguage(gameDir string, versionID string) {
 			break
 		}
 	}
-
 	if !found {
-		// 没有找到 lang 行，添加
 		lines = append(lines, fmt.Sprintf("lang:%s", requiredLang))
 	}
-
-	// 写回文件
 	newData := strings.Join(lines, "\n")
-	if err := os.WriteFile(optionsPath, []byte(newData), 0644); err != nil {
+	if err := secureWritePrivateFile(optionsPath, []byte(newData)); err != nil {
 		a.writeLog("写入 options.txt 失败: %v", err)
 	} else {
 		a.writeLog("已将游戏语言设置为 %s", requiredLang)
 	}
 }
 
-// ensureNativesForLoader 为加载器版本确保 natives 存在
-// 原版下载时 natives 解压到了 versions/{mcVersion}/{mcVersion}-natives，
-// 但加载器版本（Forge/Fabric/NeoForge）启动时需要 versions/{loaderVersion}/{loaderVersion}-natives
 func (a *App) ensureNativesForLoader(mcDir string, versionID string, versionDir string, nativesDir string, versionJSON *VersionJSON) {
-	// 策略1: 从父版本（原版 MC）的 natives 目录复制
-	if versionJSON.InheritsFrom != "" {
-		parentNativesDir := filepath.Join(mcDir, "versions", versionJSON.InheritsFrom, versionJSON.InheritsFrom+"-natives")
-		if entries, err := os.ReadDir(parentNativesDir); err == nil && len(entries) > 0 {
-			fmt.Printf("从父版本复制 natives: %s -> %s\n", parentNativesDir, nativesDir)
-			copyDirContents(parentNativesDir, nativesDir)
-			return
+	if rawParent := strings.TrimSpace(versionJSON.InheritsFrom); rawParent != "" {
+		parentName := safeVersionName(rawParent)
+		if parentName != "" {
+			parentNativesDir := filepath.Join(mcDir, "versions", parentName, parentName+"-natives")
+			if entries, err := os.ReadDir(parentNativesDir); err == nil && len(entries) > 0 {
+				fmt.Printf("从父版本复制 natives: %s -> %s\n", parentNativesDir, nativesDir)
+				copyDirContents(parentNativesDir, nativesDir)
+				return
+			}
 		}
 	}
-
-	// 策略2: 尝试从其他已安装版本中查找匹配的原版 natives
 	versionsDir := filepath.Join(mcDir, "versions")
 	entries, _ := os.ReadDir(versionsDir)
 	for _, entry := range entries {
@@ -2137,1083 +1528,108 @@ func (a *App) ensureNativesForLoader(mcDir string, versionID string, versionDir 
 			}
 		}
 	}
-
-	// 策略3: 强制重新解压（合并后的 JSON 应该包含 native 库信息）
 	fmt.Printf("尝试重新解压 natives 到: %s\n", nativesDir)
 	a.extractNativesFromJSON(mcDir, nativesDir, versionJSON)
 }
 
-// copyDirContents 复制目录中的所有文件到目标目录
-func copyDirContents(srcDir string, dstDir string) error {
-	os.MkdirAll(dstDir, 0755)
+// copyDirContents 只复制 srcDir 顶层的普通文件到 dstDir（不递归）。
+// 显式跳过符号链接 / 特殊文件，并对单文件与总量设上限：源目录是各版本 natives，
+// 正常只含体积有限的 .dll/.so；跳过链接可避免把链接目标（可能指向目录外敏感文件）
+// 以普通文件形式带进运行目录。
+//
+// 复制统一走 copyFileSecure 的“流式 + 原子写 + 源/目标符号链接拒绝 + 多读 1
+// 判超限”，不再用 os.ReadFile 把单个最多 256MiB 的文件整体读进内存（那会造成
+// 与文件等大的瞬时内存峰值）；这里只按声明大小记账，实际超限由 copyFileSecure
+// 在流式阶段兜底。
+const maxCopyDirEntryBytes int64 = 256 << 20
 
+func copyDirContents(srcDir string, dstDir string) error {
+	if err := os.MkdirAll(dstDir, 0700); err != nil {
+		return err
+	}
 	entries, err := os.ReadDir(srcDir)
 	if err != nil {
 		return err
 	}
-
+	var total int64
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
 		}
-		srcPath := filepath.Join(srcDir, entry.Name())
-		dstPath := filepath.Join(dstDir, entry.Name())
-
-		data, err := os.ReadFile(srcPath)
+		// ReadDir 不跟随链接：任何非常规文件（符号链接 / 设备 / 管道等）一律跳过。
+		if entry.Type()&os.ModeType != 0 {
+			continue
+		}
+		info, err := entry.Info()
 		if err != nil {
 			continue
 		}
-		os.WriteFile(dstPath, data, 0644)
+		size := info.Size()
+		if size > maxCopyDirEntryBytes || total+size > maxNativeTotalBytes {
+			continue
+		}
+		srcPath := filepath.Join(srcDir, entry.Name())
+		dstPath := filepath.Join(dstDir, entry.Name())
+		// copyFileSecure 内部会再做一次源链接检查、目标链接拒绝，并以 LimitReader
+		// 多读 1 字节发现“声明大小正常但读取中持续增长”的文件。
+		if err := copyFileSecure(srcPath, dstPath, 0600, maxCopyDirEntryBytes); err != nil {
+			continue
+		}
+		total += size
 	}
-
 	return nil
 }
 
-// generateOfflineUUID 根据用户名生成离线 UUID
+// generateOfflineUUID 使用 UMFS 哈希（bool-hybrid-array 生态）
 func generateOfflineUUID(username string) string {
 	data := "OfflinePlayer:" + username
-	hash := md5.Sum([]byte(data))
-
+	hash := NewUMFS([]byte(data)).Digest()
 	hash[6] = (hash[6] & 0x0f) | 0x30
 	hash[8] = (hash[8] & 0x3f) | 0x80
-
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
-		hash[0:4],
-		hash[4:6],
-		hash[6:8],
-		hash[8:10],
-		hash[10:16],
-	)
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", hash[0:4], hash[4:6], hash[6:8], hash[8:10], hash[10:16])
 }
 
-// generateRandomToken 生成随机访问令牌（避免Demo模式）
 func generateRandomToken() string {
-	now := time.Now().UnixNano()
-	data := fmt.Sprintf("QGLToken%d%d", now, os.Getpid())
-	hash := md5.Sum([]byte(data))
-	return fmt.Sprintf("%08x%04x%04x%04x%012x",
-		hash[0:4],
-		hash[4:6],
-		hash[6:8],
-		hash[8:10],
-		hash[10:16],
-	)
+	return generateUMFSToken()
 }
 
-// 崩溃检测关键字（参考PCL）
 var crashKeywords = []string{
-	"Crash report saved to",
-	"This crash report has been saved to:",
-	"Could not save crash report to",
-	"Someone is closing me!",
-	"Restarting Minecraft with command",
-	"An exception was thrown, the game will display an error screen and halt.",
-	"UNABLE TO LAUNCH",
-	"Failed to start the Minecraft runtime",
-	"Exception in thread",
-	"java.lang.UnsatisfiedLinkError",
-	"java.lang.NoClassDefFoundError",
-	"java.lang.OutOfMemoryError",
-	"Unable to launch",
-	"java.lang.reflect.InvocationTargetException",
+	"Crash report saved to", "This crash report has been saved to:",
+	"Could not save crash report to", "Someone is closing me!",
+	"Restarting Minecraft with command", "An exception was thrown, the game will display an error screen and halt.",
+	"UNABLE TO LAUNCH", "Failed to start the Minecraft runtime",
+	"Exception in thread", "java.lang.UnsatisfiedLinkError",
+	"java.lang.NoClassDefFoundError", "java.lang.OutOfMemoryError",
+	"Unable to launch", "java.lang.reflect.InvocationTargetException",
 }
 
-// 日志进度关键字（参考PCL的Watcher）
 var logProgressKeywords = []struct {
-	level  int
+	level   int
 	keyword string
 }{
-	{2, "Setting user:"},
-	{3, "LWJGL Version:"},
-	{3, "lwjgl version"},
-	{4, "OpenAL initialized"},
-	{4, "Starting up SoundSystem"},
-	{5, "Created: "},
-	{5, "textures"},
-	{5, "-atlas"},
+	{2, "Setting user:"}, {3, "LWJGL Version:"}, {3, "lwjgl version"},
+	{4, "OpenAL initialized"}, {4, "Starting up SoundSystem"},
+	{5, "Created: "}, {5, "textures"}, {5, "-atlas"},
 }
 
-// LaunchGame 启动 Minecraft 游戏，并检测窗口出现或崩溃
-func (a *App) LaunchGame(versionID string) error {
-	mcDir := a.getMinecraftDir()
-	versionDir := filepath.Join(mcDir, "versions", versionID)
-
-	// 设置启动日志路径（版本目录下的 QGL\Logs\qgl_launch.log）
-	a.launchLogPath = filepath.Join(versionDir, "QGL", "Logs", "qgl_launch.log")
-	a.writeLog("===== 启动游戏: %s =====", versionID)
-	a.writeLog("版本目录: %s", versionDir)
-	a.writeLog("启动日志: %s", a.launchLogPath)
-
-	// 1. 解析版本 JSON（处理 inheritsFrom 继承关系）
-	versionJSON, err := a.resolveVersionJSON(versionID)
-	if err != nil {
-		return fmt.Errorf("解析版本 JSON 失败: %v", err)
-	}
-
-	// 判断是否为旧版 JSON（使用 minecraftArguments 而非 arguments）
-	isOldJSON := versionJSON.MinecraftArgs != ""
-
-	// 2. 选择合适的 Java（根据 MC 版本自动匹配）
-	javaEntry, err := a.SelectJavaForVersion(versionID)
-	if err != nil {
-		return fmt.Errorf("Java 选择失败: %v", err)
-	}
-	javaPath := javaEntry.Path
-
-	// 3. 确定游戏目录（版本隔离）
-	var gameDir string
-	if a.isVersionIsolated() {
-		gameDir = versionDir
-	} else {
-		gameDir = mcDir
-	}
-
-	// 4. 确保游戏目录存在
-	if err := os.MkdirAll(gameDir, 0755); err != nil {
-		return fmt.Errorf("创建游戏目录失败: %v", err)
-	}
-
-	// 5. 补全缺失的库文件（参考 PCL 的 DlClientFix）
-	runtime.EventsEmit(a.ctx, "launchStatus", "fixing")
-	a.emitProgress("downloading", "补全文件中", 0, 0)
-	a.fixMissingLibraries(mcDir, versionJSON)
-
-	// 6. 提取 natives（从合并后的完整 libraries 列表中提取）
-	nativesDir := filepath.Join(versionDir, versionID+"-natives")
-	if err := os.MkdirAll(nativesDir, 0755); err != nil {
-		return fmt.Errorf("创建 natives 目录失败: %v", err)
-	}
-	a.extractNativesFromJSON(mcDir, nativesDir, versionJSON)
-
-	// 6.5 如果 natives 目录为空（加载器版本的原版 natives 在父版本目录中），
-	// 尝试从父版本的 natives 目录复制或重新解压
-	if isEmpty, _ := isDirEmpty(nativesDir); isEmpty {
-		a.writeLog("警告: natives 目录为空，尝试从父版本或原版复制: %s", nativesDir)
-		a.ensureNativesForLoader(mcDir, versionID, versionDir, nativesDir, versionJSON)
-	}
-
-	// 7. 构建类路径
-	classpathEntries := a.buildClasspath(mcDir, versionID, versionJSON)
-
-	// 7.1 Forge 1.17+ 特殊处理：从 classpath 中移除 minecraft.jar
-	// 原因：Forge 1.17+ 使用 BootstrapLauncher + ALL-MODULE-PATH，
-	//        如果 minecraft.jar 在 classpath 中，JVM 会把它加载为模块 minecraft，
-	//        与 Forge 的模块 _1._19._2 冲突（两者导出相同的包 → ResolutionException）
-	//        BootstrapLauncher 会通过 -DignoreList 和自己的机制加载 minecraft.jar
-	// 参考 PCL：PCL 使用 -jar JavaWrapper.jar 启动，-cp 被忽略，所以不受此影响
-	isForgeNew := (strings.Contains(versionID, "forge") || strings.Contains(versionJSON.MainClass, "bootstraplauncher")) &&
-		javaEntry.MajorVer >= 17
-	if isForgeNew {
-		// 从 classpathEntries 中移除 minecraft.jar（原版 jar）
-		var filteredEntries []string
-		for _, entry := range classpathEntries {
-			// 检查是否是原版 jar（路径中包含 versions/1.19.2/1.19.2.jar 这样的模式）
-			if strings.Contains(entry, "versions") && strings.HasSuffix(entry, ".jar") {
-				// 提取 jar 文件名，检查是否是原版 jar（不包含 forge/fabric 等字样）
-				jarBase := filepath.Base(entry)
-				jarNameNoExt := strings.TrimSuffix(jarBase, ".jar")
-				// 如果 jar 名字不包含 forge/fabric/neoforge，说明是原版 jar
-				if !strings.Contains(strings.ToLower(jarNameNoExt), "forge") &&
-					!strings.Contains(strings.ToLower(jarNameNoExt), "fabric") &&
-					!strings.Contains(strings.ToLower(jarNameNoExt), "neoforge") &&
-					!strings.Contains(strings.ToLower(jarNameNoExt), "quilt") {
-					a.writeLog("Forge 1.17+ 模块冲突修复: 从 classpath 移除原版 jar: %s", entry)
-					continue
-				}
-			}
-			filteredEntries = append(filteredEntries, entry)
-		}
-		classpathEntries = filteredEntries
-	}
-
-	classpath := strings.Join(classpathEntries, ";")
-
-	// 7.5 Fabric 特殊处理：设置 fabric.classPathGroups 系统属性
-	// KnotClassLoader 需要此属性来正确加载 jline 等库，否则报 NoClassDefFoundError
-	// 格式参考 Fabric 源码: "groupName:file://path1;file://path2"
-	isFabric := strings.Contains(versionID, "fabric") ||
-		strings.Contains(versionJSON.MainClass, "fabricmc") ||
-		strings.Contains(versionJSON.MainClass, "knot")
-	var fabricClassPathGroups string
-	if isFabric && len(classpathEntries) > 0 {
-		// 将每个 classpath 条目加上 file:// 前缀，用分号分隔（Fabric KnotClassLoader 期望的格式）
-		var formattedPaths []string
-		for _, p := range classpathEntries {
-			formattedPaths = append(formattedPaths, "file:///"+strings.ReplaceAll(p, "\\", "/"))
-		}
-		fabricClassPathGroups = "default:" + strings.Join(formattedPaths, ";")
-		a.writeLog("检测到 Fabric 版本，设置 fabric.classPathGroups (%d 个库)", len(classpathEntries))
-	}
-
-	maxMem := "2G"
-	minMem := "1G"
-	config, _ := a.GetGlobalConfig()
-	if config != nil {
-		if config.MaxMemory > 0 {
-			maxMem = fmt.Sprintf("%dG", config.MaxMemory)
-		}
-		if config.MinMemory > 0 {
-			minMem = fmt.Sprintf("%dG", config.MinMemory)
-		}
-	}
-
-	var jvmArgs []string
-
-	if isOldJSON {
-		// 旧版（< 1.13）：手动拼接固定 JVM 参数模板（参考PCL的McLaunchArgumentsJvmOld）
-		jvmArgs = []string{
-			fmt.Sprintf("-Xmx%s", maxMem),
-			fmt.Sprintf("-Xms%s", minMem),
-			"-Dlog4j2.formatMsgNoLookups=true",
-			fmt.Sprintf("-Djava.library.path=%s", nativesDir),
-			"-XX:+UnlockExperimentalVMOptions",
-			"-XX:+UseG1GC",
-			"-XX:G1NewSizePercent=20",
-			"-XX:G1ReservePercent=20",
-			"-XX:MaxGCPauseMillis=50",
-			"-XX:G1HeapRegionSize=32M",
-		}
-	} else {
-		// 新版（>= 1.13）：从 arguments.jvm 数组解析
-		jvmArgs = []string{
-			fmt.Sprintf("-Xmx%s", maxMem),
-			fmt.Sprintf("-Xms%s", minMem),
-			"-Dlog4j2.formatMsgNoLookups=true",
-			fmt.Sprintf("-Djava.library.path=%s", nativesDir),
-			fmt.Sprintf("-Dorg.lwjgl.librarypath=%s", nativesDir),
-			"-Dorg.lwjgl.util.Debug=true",
-		}
-
-		if versionJSON.Arguments != nil && len(versionJSON.Arguments.JVM) > 0 {
-			for _, arg := range versionJSON.Arguments.JVM {
-				switch v := arg.(type) {
-				case string:
-					// 替换变量
-					resolved := v
-					resolved = strings.ReplaceAll(resolved, "${natives_directory}", nativesDir)
-					resolved = strings.ReplaceAll(resolved, "${library_directory}", filepath.Join(mcDir, "libraries"))
-					resolved = strings.ReplaceAll(resolved, "${libraries_directory}", filepath.Join(mcDir, "libraries"))
-					resolved = strings.ReplaceAll(resolved, "${classpath_separator}", ";")
-					resolved = strings.ReplaceAll(resolved, "${classpath}", classpath)
-					resolved = strings.ReplaceAll(resolved, "${launcher_name}", "QGL")
-					resolved = strings.ReplaceAll(resolved, "${launcher_version}", launcherVersion)
-					resolved = strings.ReplaceAll(resolved, "${version_name}", versionID)
-					jvmArgs = append(jvmArgs, resolved)
-				case map[string]interface{}:
-					// 带 rules 的参数，检查是否适用
-					if shouldIncludeArg(v) {
-						if values, ok := v["value"]; ok {
-							switch val := values.(type) {
-							case string:
-								resolved := val
-								resolved = strings.ReplaceAll(resolved, "${natives_directory}", nativesDir)
-								resolved = strings.ReplaceAll(resolved, "${library_directory}", filepath.Join(mcDir, "libraries"))
-								resolved = strings.ReplaceAll(resolved, "${libraries_directory}", filepath.Join(mcDir, "libraries"))
-								resolved = strings.ReplaceAll(resolved, "${classpath_separator}", ";")
-								resolved = strings.ReplaceAll(resolved, "${classpath}", classpath)
-								resolved = strings.ReplaceAll(resolved, "${launcher_name}", "QGL")
-								resolved = strings.ReplaceAll(resolved, "${launcher_version}", launcherVersion)
-								resolved = strings.ReplaceAll(resolved, "${version_name}", versionID)
-								jvmArgs = append(jvmArgs, resolved)
-							case []interface{}:
-								for _, item := range val {
-									if s, ok := item.(string); ok {
-										resolved := s
-										resolved = strings.ReplaceAll(resolved, "${natives_directory}", nativesDir)
-										resolved = strings.ReplaceAll(resolved, "${library_directory}", filepath.Join(mcDir, "libraries"))
-										resolved = strings.ReplaceAll(resolved, "${libraries_directory}", filepath.Join(mcDir, "libraries"))
-										resolved = strings.ReplaceAll(resolved, "${classpath_separator}", ";")
-										resolved = strings.ReplaceAll(resolved, "${classpath}", classpath)
-										resolved = strings.ReplaceAll(resolved, "${launcher_name}", "QGL")
-										resolved = strings.ReplaceAll(resolved, "${launcher_version}", launcherVersion)
-										resolved = strings.ReplaceAll(resolved, "${version_name}", versionID)
-										jvmArgs = append(jvmArgs, resolved)
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// 7.6 Fabric: 添加 fabric.classPathGroups 系统属性（必须在 jvmArgs 构建之后）
-	if isFabric && fabricClassPathGroups != "" {
-		jvmArgs = append(jvmArgs, "-Dfabric.classPathGroups="+fabricClassPathGroups)
-	}
-
-	// 7.7 Forge 特殊处理：移除我们之前添加的 --add-exports bootstraplauncher 参数
-	// 问题：--add-exports 在模块加载前被处理，导致 "Unknown module" 警告
-	// BootstrapLauncher 会自己处理模块加载，不需要提前添加此参数
-
-	// 7.8 恢复原始的 ALL-MODULE-PATH 行为，不移除也不添加 --limit-modules
-	// BootstrapLauncher 会正确处理模块依赖，不需要我们干预
-
-	// 7.9 JVM 参数去重（参考 PCL 的 DeDuplicateDataList 逻辑）
-	// 如果不合并多词参数（如 -XX:MaxDirectMemorySize 256M）就去重，
-	// 会导致 Forge 1.17+ 启动无效（它有两个 --add-exports，其中一个会在去重时丢失）
-	jvmArgs = deduplicateJvmArgs(jvmArgs)
-
-	// 8. 构建游戏参数
-	username := "Player"
-	currentUser, err := a.GetCurrentUser()
-	if err == nil && currentUser.Username != "" {
-		username = currentUser.Username
-	}
-	userID := currentUser.Dir
-
-	// 根据用户类型确定 UUID、access token 和 user type
-	uuid := generateOfflineUUID(username)
-	// 离线用户 AccessToken = UUID（参考PCL的McLoginLegacyStart，避免Demo模式）
-	accessToken := uuid
-	// PCL 对所有用户类型都使用 "msa" 作为 user_type，避免Demo模式
-	userType := "msa"
-
-	if currentUser.Type == UserTypePremium {
-		authData, authErr := a.GetMSAuthData(userID)
-		if authErr == nil && authData.MCAccessToken != "" {
-			_ = a.RefreshMicrosoftToken(userID)
-			authData, authErr = a.GetMSAuthData(userID)
-			if authErr == nil {
-				uuid = authData.UUID
-				accessToken = authData.MCAccessToken
-				if len(uuid) == 32 {
-					uuid = fmt.Sprintf("%s-%s-%s-%s-%s",
-						uuid[0:8], uuid[8:12], uuid[12:16], uuid[16:20], uuid[20:32])
-				}
-			}
-		}
-	}
-
-	if currentUser.Type == UserTypeExternal {
-		extData, extErr := a.GetExternalAuthData(userID)
-		if extErr == nil && extData.AccessToken != "" {
-			_ = a.RefreshExternalToken(userID)
-			extData, extErr = a.GetExternalAuthData(userID)
-			if extErr == nil {
-				uuid = extData.UUID
-				accessToken = extData.AccessToken
-				if len(uuid) == 32 {
-					uuid = fmt.Sprintf("%s-%s-%s-%s-%s",
-						uuid[0:8], uuid[8:12], uuid[12:16], uuid[16:20], uuid[20:32])
-				}
-				// 外置用户仍使用 "msa" 作为 user_type，避免 Demo 模式
-				// authlib-injector 会拦截 Mojang authlib 调用并重定向到 Yggdrasil 服务器
-			}
-		}
-	}
-
-	assetsRoot := filepath.Join(mcDir, "assets")
-	assetIndexName := ""
-	if versionJSON.AssetIndex != nil {
-		assetIndexName = versionJSON.AssetIndex.ID
-	}
-
-	// 旧版资源路径（1.6 以下使用 game_assets 而非 assets_root）
-	gameAssets := filepath.Join(mcDir, "assets", "virtual", "legacy")
-
-	replacements := map[string]string{
-		"${auth_player_name}":  username,
-		"${version_name}":      versionID,
-		"${game_directory}":    gameDir,
-		"${assets_root}":       assetsRoot,
-		"${assets_index_name}": assetIndexName,
-		"${auth_uuid}":         uuid,
-		"${auth_access_token}": accessToken,
-		"${access_token}":      accessToken,
-		"${auth_session}":      accessToken,
-		"${user_type}":         userType,
-		"${version_type}":      "QGL",
-		"${user_properties}":   "{}",
-		"${game_assets}":       gameAssets,
-		"${classpath}":         classpath,
-		"${classpath_separator}": ";",
-		"${natives_directory}": nativesDir,
-		"${library_directory}": filepath.Join(mcDir, "libraries"),
-		"${launcher_name}":     "QGL",
-		"${launcher_version}": launcherVersion,
-		"${resolution_width}":  "854",
-		"${resolution_height}": "480",
-	}
-
-	var gameArgs []string
-
-	// 旧版 Game 参数：从 minecraftArguments 字段解析（参考PCL的McLaunchArgumentsGameOld）
-	if isOldJSON {
-		parts := strings.Split(versionJSON.MinecraftArgs, " ")
-		for _, part := range parts {
-			arg := part
-			for k, v := range replacements {
-				arg = strings.ReplaceAll(arg, k, v)
-			}
-			gameArgs = append(gameArgs, arg)
-		}
-		// 旧版如果没有 --height 和 --width，追加默认分辨率
-		hasHeight := false
-		for _, a := range gameArgs {
-			if a == "--height" || strings.HasPrefix(a, "--height=") {
-				hasHeight = true
-				break
-			}
-		}
-		if !hasHeight {
-			gameArgs = append(gameArgs, "--height", "480", "--width", "854")
-		}
-	}
-
-	// 新版 Game 参数：从 arguments.game 数组解析（参考PCL的McLaunchArgumentsGameNew）
-	// 注意：minecraftArguments 和 arguments.game 可以共存，两者拼接
-	if versionJSON.Arguments != nil && len(versionJSON.Arguments.Game) > 0 {
-		for _, arg := range versionJSON.Arguments.Game {
-			switch v := arg.(type) {
-			case string:
-				resolved := v
-				for k, rep := range replacements {
-					resolved = strings.ReplaceAll(resolved, k, rep)
-				}
-				gameArgs = append(gameArgs, resolved)
-			case map[string]interface{}:
-				if shouldIncludeArg(v) {
-					if values, ok := v["value"]; ok {
-						switch val := values.(type) {
-						case string:
-							resolved := val
-							for k, rep := range replacements {
-								resolved = strings.ReplaceAll(resolved, k, rep)
-							}
-							gameArgs = append(gameArgs, resolved)
-						case []interface{}:
-							for _, item := range val {
-								if s, ok := item.(string); ok {
-									resolved := s
-									for k, rep := range replacements {
-										resolved = strings.ReplaceAll(resolved, k, rep)
-									}
-									gameArgs = append(gameArgs, resolved)
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// 8. 组装完整命令
-	mainClass := versionJSON.MainClass
-	if mainClass == "" {
-		return fmt.Errorf("版本 JSON 中缺少 mainClass")
-	}
-
-	// 外置用户：注入 authlib-injector
-	if currentUser.Type == UserTypeExternal {
-		extData, extErr := a.GetExternalAuthData(userID)
-		if extErr != nil {
-			a.writeLog("警告: 读取外置认证数据失败: %v", extErr)
-		} else {
-			injectorPath, injErr := a.GetAuthlibInjectorPath()
-			if injErr != nil {
-				a.writeLog("错误: 获取 authlib-injector 失败: %v", injErr)
-				return fmt.Errorf("外置登录需要 authlib-injector，但获取失败: %v", injErr)
-			}
-			// 将 authlib-injector.jar 加入 classpath（关键！否则仍使用 Mojang 原版 authlib）
-			classpath = injectorPath + ";" + classpath
-			a.writeLog("authlib-injector 路径: %s", injectorPath)
-
-			// 预获取服务器信息（参考 PCL 的 prefetched 机制）
-			serverURL := extData.ServerURL
-			prefetched := ""
-			client := &http.Client{Timeout: 10 * time.Second}
-			resp, err := client.Get(serverURL)
-			if err == nil {
-				respBody, _ := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				prefetched = base64.StdEncoding.EncodeToString(respBody)
-				a.writeLog("预获取服务器信息成功，长度: %d", len(respBody))
-			} else {
-				a.writeLog("警告: 预获取服务器信息失败: %v", err)
-			}
-
-			injectorArgs := []string{
-				"-javaagent:" + injectorPath + "=" + serverURL,
-				"-Dauthlibinjector.side=client",
-			}
-			if prefetched != "" {
-				injectorArgs = append(injectorArgs, "-Dauthlibinjector.yggdrasil.prefetched="+prefetched)
-			}
-			// 插入到 jvmArgs 最前面
-			jvmArgs = append(injectorArgs, jvmArgs...)
-			a.writeLog("已注入 authlib-injector 参数: %v", injectorArgs)
-		}
-	}
-
-	// 检查 jvmArgs 中是否已包含 -cp（新版 Forge/Fabric 的 JSON 中自带 -cp ${classpath}）
-	hasCpInJvmArgs := false
-	for i, arg := range jvmArgs {
-		if arg == "-cp" && i+1 < len(jvmArgs) {
-			hasCpInJvmArgs = true
-			break
-		}
-	}
-
-	var allArgs []string
-	if hasCpInJvmArgs {
-		// 新版 JSON 已包含 -cp，直接追加 mainClass 和 gameArgs
-		allArgs = append(jvmArgs, mainClass)
-		allArgs = append(allArgs, gameArgs...)
-	} else {
-		// 旧版 JSON 没有 -cp，需要手动添加
-		allArgs = append(jvmArgs, "-cp", classpath, mainClass)
-		allArgs = append(allArgs, gameArgs...)
-	}
-
-	// 打印完整命令行到日志文件（用于调试对比 PCL）
-	a.writeLog("===== 完整启动命令 =====")
-	a.writeLog("Java: %s", javaPath)
-	a.writeLog("工作目录: %s", gameDir)
-	a.writeLog("JVM 参数数: %d, Classpath 条目数: %d, 游戏参数数: %d, 总参数数: %d",
-		len(jvmArgs), len(classpathEntries), len(gameArgs), len(allArgs))
-	for i, arg := range allArgs {
-		if len(arg) > 150 {
-			a.writeLog("  [%d] %s...", i, arg[:150])
-		} else {
-			a.writeLog("  [%d] %s", i, arg)
-		}
-	}
-	a.writeLog("========================")
-
-	// 8.5 设置游戏语言为中文（参考 PCL 的 options.txt 修改逻辑）
-	a.setGameLanguage(gameDir, versionID)
-
-	// 9. 执行命令
-	// 使用 SysProcAttr.CmdLine 直接传递原始命令行给 CreateProcess，
-	// 避免 Go 的 makeCmdLine 参数解析问题，同时 Go 仍能直接追踪 Java 进程
-	var cmdLineParts []string
-	cmdLineParts = append(cmdLineParts, "\""+javaPath+"\"")
-	for _, arg := range allArgs {
-		if strings.Contains(arg, " ") {
-			cmdLineParts = append(cmdLineParts, "\""+arg+"\"")
-		} else {
-			cmdLineParts = append(cmdLineParts, arg)
-		}
-	}
-	fullCmdLine := strings.Join(cmdLineParts, " ")
-	a.writeLog("命令行长度: %d 字符", len(fullCmdLine))
-
-	cmd := exec.Command(javaPath)
-	cmd.Dir = gameDir
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		CmdLine: fullCmdLine,
-	}
-
-	// 创建管道捕获 stdout 和 stderr
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("创建 stdout 管道失败: %v", err)
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("创建 stderr 管道失败: %v", err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("启动游戏失败: %v", err)
-	}
-
-	pid := cmd.Process.Pid
-	processStartTime := time.Now()
-	a.writeLog("游戏进程 PID: %d", pid)
-
-	// 10. 在后台监控游戏状态
-	go a.watchGameProcess(cmd, stdoutPipe, stderrPipe, pid, processStartTime)
-
-	return nil
-}
-
-// GetLaunchCommand 获取启动命令（不执行），用于导出启动命令功能
-func (a *App) GetLaunchCommand(versionID string) (string, error) {
-	mcDir := a.getMinecraftDir()
-	versionDir := filepath.Join(mcDir, "versions", versionID)
-
-	// 1. 解析版本 JSON
-	versionJSON, err := a.resolveVersionJSON(versionID)
-	if err != nil {
-		return "", fmt.Errorf("解析版本 JSON 失败: %v", err)
-	}
-
-	isOldJSON := versionJSON.MinecraftArgs != ""
-
-	// 2. 选择 Java
-	javaEntry, err := a.SelectJavaForVersion(versionID)
-	if err != nil {
-		return "", fmt.Errorf("Java 选择失败: %v", err)
-	}
-	javaPath := javaEntry.Path
-
-	// 3. 确定游戏目录
-	var gameDir string
-	if a.isVersionIsolated() {
-		gameDir = versionDir
-	} else {
-		gameDir = mcDir
-	}
-
-	// 5. 补全缺失的库文件
-	a.fixMissingLibraries(mcDir, versionJSON)
-
-	// 6. 提取 natives
-	nativesDir := filepath.Join(versionDir, versionID+"-natives")
-	if err := os.MkdirAll(nativesDir, 0755); err != nil {
-		return "", fmt.Errorf("创建 natives 目录失败: %v", err)
-	}
-	a.extractNativesFromJSON(mcDir, nativesDir, versionJSON)
-
-	if isEmpty, _ := isDirEmpty(nativesDir); isEmpty {
-		a.ensureNativesForLoader(mcDir, versionID, versionDir, nativesDir, versionJSON)
-	}
-
-	// 7. 构建类路径
-	classpathEntries := a.buildClasspath(mcDir, versionID, versionJSON)
-
-	isForgeNew := (strings.Contains(versionID, "forge") || strings.Contains(versionJSON.MainClass, "bootstraplauncher")) &&
-		javaEntry.MajorVer >= 17
-	if isForgeNew {
-		var filteredEntries []string
-		for _, entry := range classpathEntries {
-			jarBase := filepath.Base(entry)
-			jarNameNoExt := strings.TrimSuffix(jarBase, ".jar")
-			if !strings.Contains(strings.ToLower(jarNameNoExt), "forge") &&
-				!strings.Contains(strings.ToLower(jarNameNoExt), "fabric") &&
-				!strings.Contains(strings.ToLower(jarNameNoExt), "neoforge") &&
-				!strings.Contains(strings.ToLower(jarNameNoExt), "quilt") {
-				continue
-			}
-			filteredEntries = append(filteredEntries, entry)
-		}
-		classpathEntries = filteredEntries
-	}
-
-	classpath := strings.Join(classpathEntries, ";")
-
-	isFabric := strings.Contains(versionID, "fabric") ||
-		strings.Contains(versionJSON.MainClass, "fabricmc") ||
-		strings.Contains(versionJSON.MainClass, "knot")
-	var fabricClassPathGroups string
-	if isFabric && len(classpathEntries) > 0 {
-		var formattedPaths []string
-		for _, p := range classpathEntries {
-			formattedPaths = append(formattedPaths, "file:///"+strings.ReplaceAll(p, "\\", "/"))
-		}
-		fabricClassPathGroups = "default:" + strings.Join(formattedPaths, ";")
-	}
-
-	maxMem := "2G"
-	minMem := "1G"
-	config, _ := a.GetGlobalConfig()
-	if config != nil {
-		if config.MaxMemory > 0 {
-			maxMem = fmt.Sprintf("%dG", config.MaxMemory)
-		}
-		if config.MinMemory > 0 {
-			minMem = fmt.Sprintf("%dG", config.MinMemory)
-		}
-	}
-
-	var jvmArgs []string
-
-	if isOldJSON {
-		jvmArgs = []string{
-			fmt.Sprintf("-Xmx%s", maxMem),
-			fmt.Sprintf("-Xms%s", minMem),
-			"-Dlog4j2.formatMsgNoLookups=true",
-			fmt.Sprintf("-Djava.library.path=%s", nativesDir),
-			"-XX:+UnlockExperimentalVMOptions",
-			"-XX:+UseG1GC",
-			"-XX:G1NewSizePercent=20",
-			"-XX:G1ReservePercent=20",
-			"-XX:MaxGCPauseMillis=50",
-			"-XX:G1HeapRegionSize=32M",
-		}
-	} else {
-		jvmArgs = []string{
-			fmt.Sprintf("-Xmx%s", maxMem),
-			fmt.Sprintf("-Xms%s", minMem),
-			"-Dlog4j2.formatMsgNoLookups=true",
-			fmt.Sprintf("-Djava.library.path=%s", nativesDir),
-			fmt.Sprintf("-Dorg.lwjgl.librarypath=%s", nativesDir),
-			"-Dorg.lwjgl.util.Debug=true",
-		}
-
-		if versionJSON.Arguments != nil && len(versionJSON.Arguments.JVM) > 0 {
-			for _, arg := range versionJSON.Arguments.JVM {
-				switch v := arg.(type) {
-				case string:
-					resolved := v
-					resolved = strings.ReplaceAll(resolved, "${natives_directory}", nativesDir)
-					resolved = strings.ReplaceAll(resolved, "${library_directory}", filepath.Join(mcDir, "libraries"))
-					resolved = strings.ReplaceAll(resolved, "${libraries_directory}", filepath.Join(mcDir, "libraries"))
-					resolved = strings.ReplaceAll(resolved, "${classpath_separator}", ";")
-					resolved = strings.ReplaceAll(resolved, "${classpath}", classpath)
-					resolved = strings.ReplaceAll(resolved, "${launcher_name}", "QGL")
-					resolved = strings.ReplaceAll(resolved, "${launcher_version}", launcherVersion)
-					resolved = strings.ReplaceAll(resolved, "${version_name}", versionID)
-					jvmArgs = append(jvmArgs, resolved)
-				case map[string]interface{}:
-					if shouldIncludeArg(v) {
-						if values, ok := v["value"]; ok {
-							switch val := values.(type) {
-							case string:
-								resolved := val
-								resolved = strings.ReplaceAll(resolved, "${natives_directory}", nativesDir)
-								resolved = strings.ReplaceAll(resolved, "${library_directory}", filepath.Join(mcDir, "libraries"))
-								resolved = strings.ReplaceAll(resolved, "${libraries_directory}", filepath.Join(mcDir, "libraries"))
-								resolved = strings.ReplaceAll(resolved, "${classpath_separator}", ";")
-								resolved = strings.ReplaceAll(resolved, "${classpath}", classpath)
-								resolved = strings.ReplaceAll(resolved, "${launcher_name}", "QGL")
-								resolved = strings.ReplaceAll(resolved, "${launcher_version}", launcherVersion)
-								resolved = strings.ReplaceAll(resolved, "${version_name}", versionID)
-								jvmArgs = append(jvmArgs, resolved)
-							case []interface{}:
-								for _, item := range val {
-									if s, ok := item.(string); ok {
-										resolved := s
-										resolved = strings.ReplaceAll(resolved, "${natives_directory}", nativesDir)
-										resolved = strings.ReplaceAll(resolved, "${library_directory}", filepath.Join(mcDir, "libraries"))
-										resolved = strings.ReplaceAll(resolved, "${libraries_directory}", filepath.Join(mcDir, "libraries"))
-										resolved = strings.ReplaceAll(resolved, "${classpath_separator}", ";")
-										resolved = strings.ReplaceAll(resolved, "${classpath}", classpath)
-										resolved = strings.ReplaceAll(resolved, "${launcher_name}", "QGL")
-										resolved = strings.ReplaceAll(resolved, "${launcher_version}", launcherVersion)
-										resolved = strings.ReplaceAll(resolved, "${version_name}", versionID)
-										jvmArgs = append(jvmArgs, resolved)
-									}
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	if isFabric && fabricClassPathGroups != "" {
-		jvmArgs = append(jvmArgs, "-Dfabric.classPathGroups="+fabricClassPathGroups)
-	}
-
-	jvmArgs = deduplicateJvmArgs(jvmArgs)
-
-	// 8. 构建游戏参数
-	username := "Player"
-	currentUser, err := a.GetCurrentUser()
-	if err == nil && currentUser.Username != "" {
-		username = currentUser.Username
-	}
-	userID := currentUser.Dir
-
-	uuid := generateOfflineUUID(username)
-	accessToken := uuid
-	userType := "msa"
-
-	if currentUser.Type == UserTypePremium {
-		authData, authErr := a.GetMSAuthData(userID)
-		if authErr == nil && authData.MCAccessToken != "" {
-			_ = a.RefreshMicrosoftToken(userID)
-			authData, authErr = a.GetMSAuthData(userID)
-			if authErr == nil {
-				uuid = authData.UUID
-				accessToken = authData.MCAccessToken
-				if len(uuid) == 32 {
-					uuid = fmt.Sprintf("%s-%s-%s-%s-%s",
-						uuid[0:8], uuid[8:12], uuid[12:16], uuid[16:20], uuid[20:32])
-				}
-			}
-		}
-	}
-
-	if currentUser.Type == UserTypeExternal {
-		extData, extErr := a.GetExternalAuthData(userID)
-		if extErr == nil && extData.AccessToken != "" {
-			_ = a.RefreshExternalToken(userID)
-			extData, extErr = a.GetExternalAuthData(userID)
-			if extErr == nil {
-				uuid = extData.UUID
-				accessToken = extData.AccessToken
-				if len(uuid) == 32 {
-					uuid = fmt.Sprintf("%s-%s-%s-%s-%s",
-						uuid[0:8], uuid[8:12], uuid[12:16], uuid[16:20], uuid[20:32])
-				}
-				// 外置用户仍使用 "msa" 作为 user_type，避免 Demo 模式
-				// authlib-injector 会拦截 Mojang authlib 调用并重定向到 Yggdrasil 服务器
-			}
-		}
-	}
-
-	assetsRoot := filepath.Join(mcDir, "assets")
-	assetIndexName := ""
-	if versionJSON.AssetIndex != nil {
-		assetIndexName = versionJSON.AssetIndex.ID
-	}
-
-	gameAssets := filepath.Join(mcDir, "assets", "virtual", "legacy")
-
-	replacements := map[string]string{
-		"${auth_player_name}":    username,
-		"${version_name}":        versionID,
-		"${game_directory}":      gameDir,
-		"${assets_root}":         assetsRoot,
-		"${assets_index_name}":   assetIndexName,
-		"${auth_uuid}":           uuid,
-		"${auth_access_token}":   accessToken,
-		"${access_token}":        accessToken,
-		"${auth_session}":        accessToken,
-		"${user_type}":           userType,
-		"${version_type}":        "QGL",
-		"${user_properties}":     "{}",
-		"${game_assets}":         gameAssets,
-		"${classpath}":           classpath,
-		"${classpath_separator}": ";",
-		"${natives_directory}":   nativesDir,
-		"${library_directory}":   filepath.Join(mcDir, "libraries"),
-		"${launcher_name}":       "QGL",
-		"${launcher_version}": launcherVersion,
-		"${resolution_width}":    "854",
-		"${resolution_height}":   "480",
-	}
-
-	var gameArgs []string
-
-	if isOldJSON {
-		parts := strings.Split(versionJSON.MinecraftArgs, " ")
-		for _, part := range parts {
-			arg := part
-			for k, v := range replacements {
-				arg = strings.ReplaceAll(arg, k, v)
-			}
-			gameArgs = append(gameArgs, arg)
-		}
-		hasHeight := false
-		for _, a := range gameArgs {
-			if a == "--height" || strings.HasPrefix(a, "--height=") {
-				hasHeight = true
-				break
-			}
-		}
-		if !hasHeight {
-			gameArgs = append(gameArgs, "--height", "480", "--width", "854")
-		}
-	}
-
-	if versionJSON.Arguments != nil && len(versionJSON.Arguments.Game) > 0 {
-		for _, arg := range versionJSON.Arguments.Game {
-			switch v := arg.(type) {
-			case string:
-				resolved := v
-				for k, rep := range replacements {
-					resolved = strings.ReplaceAll(resolved, k, rep)
-				}
-				gameArgs = append(gameArgs, resolved)
-			case map[string]interface{}:
-				if shouldIncludeArg(v) {
-					if values, ok := v["value"]; ok {
-						switch val := values.(type) {
-						case string:
-							resolved := val
-							for k, rep := range replacements {
-								resolved = strings.ReplaceAll(resolved, k, rep)
-							}
-							gameArgs = append(gameArgs, resolved)
-						case []interface{}:
-							for _, item := range val {
-								if s, ok := item.(string); ok {
-									resolved := s
-									for k, rep := range replacements {
-										resolved = strings.ReplaceAll(resolved, k, rep)
-									}
-									gameArgs = append(gameArgs, resolved)
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	mainClass := versionJSON.MainClass
-	if mainClass == "" {
-		return "", fmt.Errorf("版本 JSON 中缺少 mainClass")
-	}
-
-	// 外置用户：注入 authlib-injector
-	if currentUser.Type == UserTypeExternal {
-		extData, extErr := a.GetExternalAuthData(userID)
-		if extErr != nil {
-			return "", fmt.Errorf("读取外置认证数据失败: %v", extErr)
-		}
-		injectorPath, injErr := a.GetAuthlibInjectorPath()
-		if injErr != nil {
-			return "", fmt.Errorf("外置登录需要 authlib-injector，但获取失败: %v", injErr)
-		}
-		// 将 authlib-injector.jar 加入 classpath
-		classpath = injectorPath + ";" + classpath
-
-		serverURL := extData.ServerURL
-		prefetched := ""
-		client := &http.Client{Timeout: 10 * time.Second}
-		resp, err := client.Get(serverURL)
-		if err == nil {
-			respBody, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			prefetched = base64.StdEncoding.EncodeToString(respBody)
-		}
-
-		injectorArgs := []string{
-			"-javaagent:" + injectorPath + "=" + serverURL,
-			"-Dauthlibinjector.side=client",
-		}
-		if prefetched != "" {
-			injectorArgs = append(injectorArgs, "-Dauthlibinjector.yggdrasil.prefetched="+prefetched)
-		}
-		jvmArgs = append(injectorArgs, jvmArgs...)
-	}
-
-	hasCpInJvmArgs := false
-	for i, arg := range jvmArgs {
-		if arg == "-cp" && i+1 < len(jvmArgs) {
-			hasCpInJvmArgs = true
-			break
-		}
-	}
-
-	var allArgs []string
-	if hasCpInJvmArgs {
-		allArgs = append(jvmArgs, mainClass)
-		allArgs = append(allArgs, gameArgs...)
-	} else {
-		allArgs = append(jvmArgs, "-cp", classpath, mainClass)
-		allArgs = append(allArgs, gameArgs...)
-	}
-
-	// 组装完整命令字符串
-	var cmdParts []string
-	cmdParts = append(cmdParts, "\""+javaPath+"\"")
-	for _, arg := range allArgs {
-		if strings.Contains(arg, " ") || strings.Contains(arg, "\"") {
-			cmdParts = append(cmdParts, "\""+strings.ReplaceAll(arg, "\"", "\\\"")+"\"")
-		} else {
-			cmdParts = append(cmdParts, arg)
-		}
-	}
-
-	return strings.Join(cmdParts, " "), nil
-}
-
-// shouldIncludeArg 检查带 rules 的参数是否应该包含（参考PCL的McJsonRuleCheck）
 func shouldIncludeArg(arg map[string]interface{}) bool {
-	rulesRaw, ok := arg["rules"]
-	if !ok {
-		// 没有 rules，默认包含
-		return true
-	}
-
-	rules, ok := rulesRaw.([]interface{})
-	if !ok {
-		return true
-	}
-
-	// 遍历所有规则
-	for _, ruleRaw := range rules {
-		rule, ok := ruleRaw.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		action, _ := rule["action"].(string)
-		if action == "" {
-			continue
-		}
-
-		// 检查 features 规则（参考PCL：is_demo_user 的规则应该排除）
-		if features, hasFeatures := rule["features"]; hasFeatures {
-			if featMap, ok := features.(map[string]interface{}); ok {
-				// 如果规则包含 is_demo_user，则排除此参数（我们不是 demo 用户）
-				if _, isDemo := featMap["is_demo_user"]; isDemo {
-					return false
-				}
-			}
-		}
-
-		// 检查 os 规则
-		osRule, hasOS := rule["os"].(map[string]interface{})
-		matchesOS := true
-		if hasOS {
-			osName, _ := osRule["name"].(string)
-			// 我们在 Windows 上运行
-			matchesOS = osName == "windows"
-		}
-
-		if action == "allow" {
-			// allow 规则：如果匹配则允许
-			if !matchesOS {
-				return false
-			}
-		} else if action == "disallow" {
-			// disallow 规则：如果匹配则禁止
-			if matchesOS {
-				return false
-			}
-		}
-	}
-
-	return true
+	// 条件化参数统一走 ruleengine：裸 map 的 rules 被翻译成通用规则后按 Mojang
+	// 语义评估（os.name/arch/version + features），与库过滤共用同一内核，避免
+	// 两份实现漂移。旧实现只认 windows、且 features 只要出现 is_demo_user 键
+	// （无论真假值）就拒绝，会把 {"is_demo_user":false} 的正常参数误删。
+	return argumentObjectAllowed(arg, currentRuleEnv())
 }
 
-// fixForgeModuleConflict 修复 Forge 启动时的 Java 模块系统冲突
-// 问题：Forge 版本 JSON 的 arguments.jvm 中包含 --add-modules ALL-MODULE-PATH
-// 这会让 Java 自动加载 classpath 中所有带 module-info.class 的 JAR 作为模块
-// minecraft.jar (模块名 minecraft) 和 Forge JAR (模块名 _1._19._2 等) 都导出 net.minecraft.server → ResolutionException
-// 解决方案：添加 --limit-modules 限制只加载 BootstrapLauncher 需要的核心模块，
-//          排除 minecraft 和 Forge 内部模块，避免冲突
-func (a *App) fixForgeModuleConflict(args []string) []string {
-	result := make([]string, 0, len(args)+3)
-
-	for i := 0; i < len(args); i++ {
-		// 在 --add-modules ALL-MODULE-PATH 之后添加 --limit-modules
-		if args[i] == "--add-modules" && i+1 < len(args) && args[i+1] == "ALL-MODULE-PATH" {
-			result = append(result, args[i])
-			result = append(result, args[i+1])
-			// 插入 --limit-modules，限制模块加载范围
-			result = append(result, "--limit-modules")
-			result = append(result, "cpw.mods.bootstraplauncher,cpw.mods.securejarhandler,org.ow2.asm.asm,org.ow2.asm.asm-commons,org.ow2.asm.asm-tree,org.ow2.asm.asm-util,org.ow2.asm.asm-analysis,net.minecraftforge.jarjarfilesystems,java.base,java.logging,java.desktop,java.instrument,java.management,java.naming,java.prefs,java.security.sasl,jdk.attach,jdk.crypto.cryptoki,jdk.crypto.ec,jdk.jfr,jdk.library.loadhook,jdk.management.agent,jdk.naming.dns,jdk.nio.fs,jdk.sctp,jdk.unsupported,jdk.unsupported.desktop,jdk.zipfs")
-			a.writeLog("修复模块冲突: 添加 --limit-modules（避免 minecraft 和 _1._19._2 冲突）")
-			i++
-			continue
-		}
-		result = append(result, args[i])
-	}
-
-	return result
-}
-
-// deduplicateJvmArgs JVM 参数去重（参考 PCL 的 DeDuplicateDataList 逻辑）
-// PCL 注释: "如果不合并，会导致 Forge 1.17 启动无效，它有两个 --add-exports，
-//          进一步导致其中一个在后面被去重丢失"
-// 关键：使用"参数键+完整值"作为去重依据，而不是仅用键。
-// 这样两个 --add-exports（值不同）都会保留，而真正重复的才会被去除。
 func deduplicateJvmArgs(args []string) []string {
 	if len(args) == 0 {
 		return args
 	}
-
-	// 将参数分组：每个以 - 开头的参数 + 它的后续值为一个组
 	type argGroup struct {
-		fullKey string // 键 + 所有值的拼接（用于去重判断）
-		parts   []string // 原始参数列表
+		fullKey string
+		parts   []string
 	}
 	var groups []argGroup
 	current := argGroup{}
-
 	for _, arg := range args {
 		if strings.HasPrefix(arg, "-") {
 			if current.fullKey != "" {
@@ -3221,15 +1637,13 @@ func deduplicateJvmArgs(args []string) []string {
 			}
 			current = argGroup{fullKey: arg, parts: []string{arg}}
 		} else {
-			current.fullKey = current.fullKey + "\x00" + arg // 用 NULL 分隔键和值
+			current.fullKey = current.fullKey + "\x00" + arg
 			current.parts = append(current.parts, arg)
 		}
 	}
 	if current.fullKey != "" {
 		groups = append(groups, current)
 	}
-
-	// 按 fullKey 去重（相同键+相同值才去重，不同值的同名参数保留）
 	seen := make(map[string]bool)
 	var result []string
 	for _, g := range groups {
@@ -3238,269 +1652,44 @@ func deduplicateJvmArgs(args []string) []string {
 			result = append(result, g.parts...)
 		}
 	}
-
 	return result
 }
 
-// watchGameProcess 监控游戏进程（参考PCL的Watcher类）
-// 同时检测：窗口出现、进程退出、崩溃日志、加载进度
-func (a *App) watchGameProcess(cmd *exec.Cmd, stdoutPipe io.Reader, stderrPipe io.Reader, pid int, processStartTime time.Time) {
-	runtime.EventsEmit(a.ctx, "launchStatus", "launching")
-
-	crashDetected := false
-	crashReason := ""
-	windowFound := false
-	logProgress := 0 // 日志加载进度 1-5（参考PCL的Watcher）
-
-	// 保存最近的日志行（用于崩溃时显示上下文）
-	var recentLines []string
-	const maxRecentLines = 50
-
-	// 用 channel 通知进程退出
-	exitChan := make(chan int, 1)
-
-	// 用 Wait() 在独立 goroutine 中等待进程退出
-	go func() {
-		err := cmd.Wait()
-		exitCode := -1
-		if err != nil {
-			if exitErr, ok := err.(*exec.ExitError); ok {
-				exitCode = exitErr.ExitCode()
-			}
-		} else {
-			exitCode = 0
-		}
-		exitChan <- exitCode
-	}()
-
-	// 启动日志监控 goroutine
-	logChan := make(chan string, 200)
-
-	// 读取 stdout
-	if stdoutPipe != nil {
-		go func() {
-			scanner := bufio.NewScanner(stdoutPipe)
-			for scanner.Scan() {
-				line := scanner.Text()
-				logChan <- line
-			}
-		}()
-	}
-
-	// 读取 stderr
-	go func() {
-		scanner := bufio.NewScanner(stderrPipe)
-		for scanner.Scan() {
-			line := scanner.Text()
-			logChan <- line
-		}
-	}()
-
-	// 日志分析 goroutine
-	go func() {
-		for line := range logChan {
-			// 保存最近的日志行
-			recentLines = append(recentLines, line)
-			if len(recentLines) > maxRecentLines {
-				recentLines = recentLines[len(recentLines)-maxRecentLines:]
-			}
-
-			// 1. 检测崩溃关键字
-			for _, keyword := range crashKeywords {
-				if strings.Contains(line, keyword) {
-					crashDetected = true
-					// 收集崩溃上下文
-					contextLines := recentLines
-					if len(contextLines) > 20 {
-						contextLines = contextLines[len(contextLines)-20:]
-					}
-					crashReason = strings.Join(contextLines, "\n")
-					break
-				}
-			}
-
-			// 2. 检测加载进度（参考PCL的Watcher.GameLog）
-			for _, kw := range logProgressKeywords {
-				if strings.Contains(line, kw.keyword) && kw.level > logProgress {
-					logProgress = kw.level
-				}
-			}
-
-			// 3. 日志进度5 或窗口出现 = 游戏启动成功
-			if logProgress >= 5 && !windowFound {
-				windowFound = true
-				runtime.EventsEmit(a.ctx, "launchStatus", "success")
-			}
-		}
-	}()
-
-	// 主循环：检测窗口和进程状态
-	startTime := time.Now()
-	launchTimeout := 30 * time.Second
-
-	for {
-		elapsed := time.Since(startTime)
-
-		// 检查窗口是否出现（参考PCL的TryGetMinecraftWindow）
-		if !windowFound {
-			found, isFML := findMinecraftWindow(pid, processStartTime)
-			if found {
-				if isFML {
-					// FML 窗口：标记窗口已出现但继续等待真正的 MC 窗口
-					windowFound = true
-					runtime.EventsEmit(a.ctx, "launchStatus", "success")
-				} else {
-					// 非 FML 窗口：游戏已完全启动
-					windowFound = true
-					runtime.EventsEmit(a.ctx, "launchStatus", "success")
-					// 等待进程退出
-					select {
-					case exitCode := <-exitChan:
-						if exitCode != 0 {
-							a.writeLog("!!! 游戏运行中崩溃 (退出码: %d) !!!", exitCode)
-							runtime.EventsEmit(a.ctx, "launchStatus", "crashed")
-							runtime.EventsEmit(a.ctx, "crashInfo", fmt.Sprintf("游戏已退出 (退出码: %d)", exitCode))
-						}
-						return
-					}
-					return
-				}
-			}
-		}
-
-		// 检查进程是否已退出（非阻塞）
-		select {
-		case exitCode := <-exitChan:
-			a.writeLog("游戏进程退出，退出码: %d, 运行时间: %.1f秒, 窗口出现: %v", exitCode, time.Since(startTime).Seconds(), windowFound)
-			if !windowFound {
-				// 收集最近的日志作为错误信息
-				logContext := ""
-				if len(recentLines) > 0 {
-					contextLines := recentLines
-					if len(contextLines) > 20 {
-						contextLines = contextLines[len(contextLines)-20:]
-					}
-					logContext = "\n\n最近日志:\n" + strings.Join(contextLines, "\n")
-					a.writeLog("最近游戏日志（最后20行）:")
-					for _, l := range contextLines {
-						a.writeLog("  %s", l)
-					}
-				}
-				if elapsed < 3*time.Second {
-					a.writeLog("!!! 游戏启动失败：进程立即退出 (退出码: %d) !!!", exitCode)
-					a.writeLog("--- UI 报错内容 ---")
-					a.writeLog("游戏启动失败，进程立即退出 (退出码: %d)%s", exitCode, logContext)
-					a.writeLog("--- UI 报错内容结束 ---")
-					runtime.EventsEmit(a.ctx, "launchStatus", "crashed")
-					runtime.EventsEmit(a.ctx, "crashInfo", fmt.Sprintf("游戏启动失败，进程立即退出 (退出码: %d)%s", exitCode, logContext))
-				} else {
-					a.writeLog("!!! 游戏进程意外退出 (退出码: %d) !!!", exitCode)
-					a.writeLog("--- UI 报错内容 ---")
-					a.writeLog("游戏进程意外退出 (退出码: %d)%s", exitCode, logContext)
-					a.writeLog("--- UI 报错内容结束 ---")
-					runtime.EventsEmit(a.ctx, "launchStatus", "crashed")
-					runtime.EventsEmit(a.ctx, "crashInfo", fmt.Sprintf("游戏进程意外退出 (退出码: %d)%s", exitCode, logContext))
-				}
-			}
-			return
-		default:
-		}
-
-		// 检查是否崩溃（通过日志关键字）
-		if crashDetected && !windowFound {
-			select {
-			case <-exitChan:
-			case <-time.After(5 * time.Second):
-			}
-			a.writeLog("!!! 检测到游戏崩溃 !!!")
-			a.writeLog("--- UI 报错内容 ---")
-			a.writeLog(crashReason)
-			a.writeLog("--- UI 报错内容结束 ---")
-			runtime.EventsEmit(a.ctx, "launchStatus", "crashed")
-			runtime.EventsEmit(a.ctx, "crashInfo", crashReason)
-			return
-		}
-
-		// 超时检测
-		if elapsed > launchTimeout && !windowFound {
-			// 如果有日志进度，说明游戏在加载中，延长超时
-			if logProgress >= 2 {
-				// 再等30秒
-				if elapsed > 60*time.Second {
-					runtime.EventsEmit(a.ctx, "launchStatus", "timeout")
-					return
-				}
-			} else {
-				runtime.EventsEmit(a.ctx, "launchStatus", "timeout")
-				return
-			}
-		}
-
-		time.Sleep(200 * time.Millisecond)
-	}
-}
-
-// findMinecraftWindow 查找 Minecraft 游戏窗口（参考PCL的TryGetMinecraftWindow三重过滤条件）
-// 返回 (是否找到, 是否为FML窗口)
 func findMinecraftWindow(targetPID int, processStartTime time.Time) (bool, bool) {
-	found := false
-	isFML := false
-
+	found, isFML := false, false
 	cb := syscall.NewCallback(func(hwnd uintptr, lParam uintptr) uintptr {
 		if found {
 			return 0
 		}
-
-		// 1. 检查窗口类名（参考PCL）
 		className := make([]byte, 512)
 		procGetClassName.Call(hwnd, uintptr(unsafe.Pointer(&className[0])), 512)
 		classNameStr := string(bytesToString(className))
-
-		isMCWindow := false
-		if classNameStr == "GLFW30" || classNameStr == "LWJGL" || classNameStr == "SunAwtFrame" {
-			isMCWindow = true
-		}
+		isMCWindow := classNameStr == "GLFW30" || classNameStr == "LWJGL" || classNameStr == "SunAwtFrame"
 		if !isMCWindow {
 			return 1
 		}
-
-		// 2. 检查窗口标题（参考PCL）
 		title := make([]byte, 512)
 		procGetWindowText.Call(hwnd, uintptr(unsafe.Pointer(&title[0])), 512)
 		titleStr := string(bytesToString(title))
-
-		// 过滤无效标题
 		if titleStr == "" || titleStr == "PopupMessageWindow" {
 			return 1
 		}
 		if strings.HasPrefix(titleStr, "GLFW") && !strings.HasPrefix(titleStr, "FML") {
 			return 1
 		}
-
-		// 3. 检查窗口所属进程
 		var windowPID int
 		procGetWindowPID.Call(hwnd, uintptr(unsafe.Pointer(&windowPID)))
-
 		if windowPID != targetPID {
 			return 1
 		}
-
-		// 4. 检查进程启动时间（参考PCL：窗口所属进程的启动时间必须晚于游戏进程的启动时间）
-		// 避免匹配已存在的旧窗口
-		// 由于我们直接比较 PID，且 PID 相同，所以这个检查主要是防止 PID 复用
-		// 在 Windows 上 PID 可能被复用，所以加上时间检查
-		_ = processStartTime // 进程启动时间已通过 PID 匹配保证
-
 		found = true
 		isFML = strings.HasPrefix(titleStr, "FML")
 		return 0
 	})
-
 	procEnumWindows.Call(cb, 0)
 	return found, isFML
 }
 
-// bytesToString 将 null 终止的 byte 数组转为 string
 func bytesToString(b []byte) string {
 	for i, c := range b {
 		if c == 0 {
@@ -3510,112 +1699,15 @@ func bytesToString(b []byte) string {
 	return string(b)
 }
 
-// GetDownloadProgress 获取当前下载进度
-func (a *App) GetDownloadProgress() DownloadProgress {
-	return a.downloadProgress
-}
+func (a *App) GetDownloadProgress() DownloadProgress { return a.downloadProgress }
+func (a *App) isVersionIsolated() bool               { return a.IsVersionIsolation() }
 
-// isVersionIsolated 检查是否启用版本隔离
-func (a *App) isVersionIsolated() bool {
-	return a.IsVersionIsolation()
-}
-
-// buildClasspath 构建类路径（参考 PCL 的 McLibListGetWithJson + McLaunchArgumentsReplace）
-func (a *App) buildClasspath(mcDir string, versionID string, versionJSON *VersionJSON) []string {
-	var classpathEntries []string
-	libsDir := filepath.Join(mcDir, "libraries")
-
-	for _, lib := range versionJSON.Libraries {
-		// 1. 检查 rules（跳过不适用于当前平台的库）
-		if !a.shouldIncludeLib(lib) {
-			continue
-		}
-
-		// 2. 跳过 natives 库（natives 不加入 classpath）
-		if lib.Natives != nil {
-			continue
-		}
-
-		// 3. 确定库文件路径
-		var libPath string
-
-		// 优先使用 downloads.artifact.path
-		if lib.Downloads != nil && lib.Downloads.Artifact != nil && lib.Downloads.Artifact.Path != "" {
-			libPath = filepath.Join(libsDir, lib.Downloads.Artifact.Path)
-		} else if lib.JarPath != "" {
-			// 有些库直接提供 path 字段
-			libPath = filepath.Join(libsDir, lib.JarPath)
-		} else if lib.Name != "" {
-			// 从 Maven 坐标推算路径（参考 PCL 的 McLibGet）
-			libPath = mavenNameToPath(lib.Name, libsDir)
-		}
-
-		if libPath == "" {
-			continue
-		}
-
-		// 4. 检查文件是否存在
-		if _, err := os.Stat(libPath); err != nil {
-			fmt.Printf("类路径库文件不存在(跳过): %s\n", libPath)
-			continue
-		}
-		classpathEntries = append(classpathEntries, libPath)
-	}
-
-	// 5. 添加游戏主 jar（classpath 的最后一个条目）
-	// 参考 PCL 的 McLibListGet：jar 字段优先，否则沿 inheritsFrom 链查找原版
-	jarName := versionJSON.Jar
-	if jarName == "" {
-		// 沿 inheritsFrom 链查找原版版本名
-		jarName = versionJSON.InheritsFrom
-	}
-	if jarName == "" {
-		jarName = versionID
-	}
-	versionJar := filepath.Join(mcDir, "versions", jarName, jarName+".jar")
-
-	// 如果 jar 不存在，尝试在当前版本目录中查找
-	if _, err := os.Stat(versionJar); err != nil {
-		altJar := filepath.Join(mcDir, "versions", versionID, versionID+".jar")
-		if _, err2 := os.Stat(altJar); err2 == nil {
-			versionJar = altJar
-		}
-	}
-
-	classpathEntries = append(classpathEntries, versionJar)
-
-	return classpathEntries
-}
-
-// shouldIncludeLib 检查库是否应该包含（参考 PCL 的 McJsonRuleCheck）
 func (a *App) shouldIncludeLib(lib Library) bool {
-	if len(lib.Rules) == 0 {
-		return true // 没有 rules，默认包含
-	}
-
-	allow := false
-	for _, rule := range lib.Rules {
-		osMatch := true
-		if rule.OS != nil {
-			osMatch = rule.OS.Name == "windows"
-		}
-
-		if rule.Action == "allow" {
-			if osMatch {
-				allow = true
-			}
-		} else if rule.Action == "disallow" {
-			if osMatch {
-				allow = false
-			}
-		}
-	}
-
-	return allow
+	// 库规则统一走 ruleengine：按 Mojang 语义评估 os.name/arch/version 与 features，
+	// 不再只判 os.name=="windows"（旧逻辑会误选 osx/linux 专属库、忽略架构与版本）。
+	return libraryRulesAllow(lib.Rules, currentRuleEnv())
 }
 
-// libGroupArtifact 从 Maven 坐标中提取 group:artifact（不含版本号）
-// 例如 "org.apache.logging.log4j:log4j-core:2.17.1" -> "org.apache.logging.log4j:log4j-core"
 func libGroupArtifact(name string) string {
 	parts := strings.Split(name, ":")
 	if len(parts) >= 2 {
@@ -3624,79 +1716,114 @@ func libGroupArtifact(name string) string {
 	return name
 }
 
-// mavenNameToPath 从 Maven 坐标推算库文件路径（参考 PCL 的 McLibGet）
-// Maven 坐标格式: group:artifact:version 或 group:artifact:version:classifier
-// 路径格式: group/artifact/version/artifact-version(-classifier).jar
+// isValidMavenToken 校验 Maven 坐标中的单个片段（groupId 段 / artifactId /
+// version / classifier）。版本 JSON 来自镜像站，属于不可信输入：只要片段里出现
+// 路径分隔符、盘符、".." 或 Maven 坐标不允许的空白 / 控制字符，就判为非法，
+// 防止恶意坐标经 mavenNameToPath 拼出逃逸 libraries 目录的路径。
+func isValidMavenToken(token string) bool {
+	if token == "" || token == "." || token == ".." {
+		return false
+	}
+	if len(token) > 255 {
+		return false
+	}
+	for _, r := range token {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			// 字母数字
+		case strings.ContainsRune("-_.@+", r):
+			// Maven 常见合法字符
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func mavenNameToPath(name string, libsDir string) string {
 	parts := strings.Split(name, ":")
 	if len(parts) < 3 {
 		return ""
 	}
-
-	group := strings.ReplaceAll(parts[0], ".", string(os.PathSeparator))
-	artifact := parts[1]
-	version := parts[2]
+	// 坐标的每一段都必须是干净的 Maven token；groupId 的每个 "." 分段也要
+	// 单独校验，否则 "..\.." 之类会在 ReplaceAll 之后变成路径穿越。
+	groupParts := strings.Split(parts[0], ".")
+	for _, seg := range groupParts {
+		if !isValidMavenToken(seg) {
+			return ""
+		}
+	}
+	artifact, version := parts[1], parts[2]
+	if !isValidMavenToken(artifact) || !isValidMavenToken(version) {
+		return ""
+	}
 	classifier := ""
 	if len(parts) >= 4 {
+		if !isValidMavenToken(parts[3]) {
+			return ""
+		}
 		classifier = "-" + parts[3]
 	}
-
-	// 文件名: artifact-version(-classifier).jar
+	group := strings.Join(groupParts, string(os.PathSeparator))
 	fileName := fmt.Sprintf("%s-%s%s.jar", artifact, version, classifier)
-
-	// 完整路径: libsDir/group/artifact/version/fileName
-	return filepath.Join(libsDir, group, artifact, version, fileName)
+	rel := filepath.Join(group, artifact, version, fileName)
+	// 拼好后再用统一的相对路径校验兜底，确保结果一定在 libraries 内。
+	if isSafeRelPath(rel) == "" {
+		return ""
+	}
+	return filepath.Join(libsDir, rel)
 }
 
-// resolveVersionJSON 解析版本 JSON，处理 inheritsFrom 继承关系
-// Forge/Fabric/NeoForge/OptiFine 版本都通过 inheritsFrom 引用原版版本
-// 需要合并父版本的 libraries、downloads、assetIndex 等信息
 func (a *App) resolveVersionJSON(versionID string) (*VersionJSON, error) {
+	// 入口版本 ID 同样来自外部（版本目录扫描 / 前端），必须先收敛成单段安全名，
+	// 避免把 "../../x" 之类直接拼进 versions/<id>/<id>.json 造成路径穿越。
+	// 版本名允许空格 / 中文等，只拦分隔符、盘符与控制符（见 safeVersionName）。
+	safeID := safeVersionName(versionID)
+	if safeID == "" {
+		return nil, fmt.Errorf("版本 ID 不是合法的单段名称，拒绝解析: %q", versionID)
+	}
+	return a.resolveVersionJSONSafe(safeID, 0, map[string]bool{})
+}
+
+// resolveVersionJSONSafe 在继承深度 / 成环检测下递归解析版本 JSON。
+func (a *App) resolveVersionJSONSafe(versionID string, depth int, seen map[string]bool) (*VersionJSON, error) {
 	mcDir := a.getMinecraftDir()
 	versionDir := filepath.Join(mcDir, "versions", versionID)
-
-	// 查找版本 JSON 文件（文件名可能与文件夹名不同）
 	jsonPath := filepath.Join(versionDir, versionID+".json")
 	if _, err := os.Stat(jsonPath); err != nil {
-		// 尝试查找文件夹中的任意 JSON 文件
 		jsonFiles, _ := filepath.Glob(filepath.Join(versionDir, "*.json"))
 		if len(jsonFiles) > 0 {
 			jsonPath = jsonFiles[0]
-		} else {
-			return nil, fmt.Errorf("未找到版本 JSON: %s", versionDir)
 		}
 	}
-
-	jsonData, err := os.ReadFile(jsonPath)
+	jsonData, err := readBoundedFile(jsonPath, maxMetadataJSONBytes)
 	if err != nil {
-		return nil, fmt.Errorf("读取版本 JSON 失败: %v", err)
+		return nil, fmt.Errorf("未找到或无法读取版本 JSON: %s (%v)", versionDir, err)
 	}
-
 	var versionJSON VersionJSON
 	if err := json.Unmarshal(jsonData, &versionJSON); err != nil {
 		return nil, fmt.Errorf("解析版本 JSON 失败: %v", err)
 	}
-
-	// 处理 inheritsFrom
-	if versionJSON.InheritsFrom != "" {
-		parentJSON, err := a.resolveVersionJSON(versionJSON.InheritsFrom)
-		if err != nil {
-			fmt.Printf("解析父版本 JSON 失败: %v（将继续使用当前版本信息）\n", err)
+	if rawParent := strings.TrimSpace(versionJSON.InheritsFrom); rawParent != "" {
+		parentID, perr := validateInheritStep(rawParent, depth, seen)
+		if perr != nil {
+			recordSecurityEvent(auditCategoryExternalURL, auditSeverityCritical, auditActionBlocked,
+				"version-manifest", "inheritsFrom: "+perr.Error())
+			return nil, perr
+		}
+		seen[versionID] = true
+		parentJSON, perr := a.resolveVersionJSONSafe(parentID, depth+1, seen)
+		if perr != nil {
+			fmt.Printf("解析父版本 JSON 失败: %v（继续使用当前版本信息）\n", perr)
 		} else {
-			// 合并父版本信息
 			versionJSON = a.mergeVersionJSON(parentJSON, &versionJSON)
 		}
 	}
-
 	return &versionJSON, nil
 }
 
-// mergeVersionJSON 合并父版本和子版本 JSON
-// 子版本（Forge/Fabric）的字段覆盖父版本（原版）的字段
 func (a *App) mergeVersionJSON(parent *VersionJSON, child *VersionJSON) VersionJSON {
-	merged := *parent // 以父版本为基础
-
-	// 子版本覆盖的字段
+	merged := *parent
 	if child.ID != "" {
 		merged.ID = child.ID
 	}
@@ -3712,29 +1839,18 @@ func (a *App) mergeVersionJSON(parent *VersionJSON, child *VersionJSON) VersionJ
 	if child.Jar != "" {
 		merged.Jar = child.Jar
 	}
-
-	// 合并 libraries：父版本 + 子版本（按 group:artifact 去重）
-	// 规则：子版本的库覆盖父版本中相同 group:artifact 的所有条目
-	// 这样 Forge 的 log4j 会覆盖原版的 log4j，而 LWJGL 等原版独有库全部保留
 	childGroupArtifacts := map[string]bool{}
 	for _, lib := range child.Libraries {
-		ga := libGroupArtifact(lib.Name)
-		if ga != "" {
-			childGroupArtifacts[ga] = true
-		}
+		childGroupArtifacts[libGroupArtifact(lib.Name)] = true
 	}
 	var mergedLibs []Library
 	for _, lib := range parent.Libraries {
-		ga := libGroupArtifact(lib.Name)
-		if ga != "" && childGroupArtifacts[ga] {
-			continue // 子版本有同名 group:artifact，跳过父版本
+		if !childGroupArtifacts[libGroupArtifact(lib.Name)] {
+			mergedLibs = append(mergedLibs, lib)
 		}
-		mergedLibs = append(mergedLibs, lib)
 	}
 	mergedLibs = append(mergedLibs, child.Libraries...)
 	merged.Libraries = mergedLibs
-
-	// 合并 arguments
 	if child.MinecraftArgs != "" {
 		merged.MinecraftArgs = child.MinecraftArgs
 	}
@@ -3742,28 +1858,953 @@ func (a *App) mergeVersionJSON(parent *VersionJSON, child *VersionJSON) VersionJ
 		if merged.Arguments == nil {
 			merged.Arguments = &ArgumentsObj{}
 		}
-		// 合并 JVM 参数：父版本 + 子版本
 		if len(child.Arguments.JVM) > 0 {
 			merged.Arguments.JVM = append(merged.Arguments.JVM, child.Arguments.JVM...)
 		}
-		// 合并 Game 参数：父版本 + 子版本
 		if len(child.Arguments.Game) > 0 {
 			merged.Arguments.Game = append(merged.Arguments.Game, child.Arguments.Game...)
 		}
 	}
-
-	// 子版本有自己的 downloads 时覆盖
 	if child.Downloads != nil {
 		merged.Downloads = child.Downloads
 	}
-	// 子版本有自己的 assetIndex 时覆盖
 	if child.AssetIndex != nil {
 		merged.AssetIndex = child.AssetIndex
 	}
-
-	// 保留 inheritsFrom 用于参考
 	merged.InheritsFrom = child.InheritsFrom
-
 	return merged
 }
 
+func (a *App) buildClasspath(mcDir string, versionID string, versionJSON *VersionJSON) []string {
+	var entries []string
+	libsDir := filepath.Join(mcDir, "libraries")
+	for _, lib := range versionJSON.Libraries {
+		if !a.shouldIncludeLib(lib) || lib.Natives != nil {
+			continue
+		}
+		var libPath string
+		if lib.Downloads != nil && lib.Downloads.Artifact != nil && lib.Downloads.Artifact.Path != "" {
+			safePath := isSafeRelPath(lib.Downloads.Artifact.Path)
+			if safePath == "" {
+				continue
+			}
+			libPath = filepath.Join(libsDir, safePath)
+		} else if lib.JarPath != "" {
+			// lib.JarPath 是镜像 JSON 直接给的相对路径，必须校验，
+			// 否则恶意条目可以把 libraries 之外的任意 jar 塞进启动 classpath。
+			safeJarPath := isSafeRelPath(lib.JarPath)
+			if safeJarPath == "" {
+				continue
+			}
+			libPath = filepath.Join(libsDir, safeJarPath)
+		} else if lib.Name != "" {
+			libPath = mavenNameToPath(lib.Name, libsDir)
+		}
+		if libPath == "" {
+			continue
+		}
+		if _, err := os.Stat(libPath); err != nil {
+			continue
+		}
+		entries = append(entries, libPath)
+	}
+	// Jar / InheritsFrom 来自外部版本 JSON，会拼进 versions/<name>/<name>.jar，
+	// 必须逐个收敛成单段安全名；三者都非法时跳过该 classpath 条目而不是拼出穿越路径。
+	jarName := ""
+	for _, c := range []string{versionJSON.Jar, versionJSON.InheritsFrom, versionID} {
+		if s := safeVersionName(c); s != "" {
+			jarName = s
+			break
+		}
+	}
+	if jarName != "" {
+		versionJar := filepath.Join(mcDir, "versions", jarName, jarName+".jar")
+		if _, err := os.Stat(versionJar); err != nil {
+			if self := safeVersionName(versionID); self != "" {
+				altJar := filepath.Join(mcDir, "versions", self, self+".jar")
+				if _, err2 := os.Stat(altJar); err2 == nil {
+					versionJar = altJar
+				}
+			}
+		}
+		entries = append(entries, versionJar)
+	}
+	return entries
+}
+
+// sanitizeLaunchUsername 清洗进入游戏命令行参数的用户名。
+// 老版本 version JSON 的 MinecraftArgs 是按空格切分的字符串，
+// 用户名里只要含空格/制表符/控制字符，就能在 ${auth_player_name} 处
+// 注入任意额外游戏参数（参数注入）。这里剔除空白与控制字符、按 16 个
+// rune 截断（Minecraft 用户名上限），清洗后为空则回退 Player。
+// 正版用户名本身只会含字母数字下划线，此清洗不影响正常用户。
+func sanitizeLaunchUsername(raw string) string {
+	var b strings.Builder
+	count := 0
+	for _, r := range raw {
+		if count >= 16 {
+			break
+		}
+		if unicode.IsControl(r) || unicode.IsSpace(r) {
+			continue
+		}
+		b.WriteRune(r)
+		count++
+	}
+	name := b.String()
+	if name == "" {
+		return "Player"
+	}
+	return name
+}
+
+func (a *App) buildLaunchArgs(versionID string, versionJSON *VersionJSON, mcDir string, versionDir string) ([]string, string, string, string) {
+	isOldJSON := versionJSON.MinecraftArgs != ""
+	javaEntry, _ := a.SelectJavaForVersion(versionID)
+	maxMem, minMem := "2G", "1G"
+	if config, _ := a.GetGlobalConfig(); config != nil {
+		// r34：-Xmx/-Xms 不再裸拼 config 整数。SaveGlobalConfig 不校验堆配置，旧实现
+		// 会把 0 / 负数 / 极大值 / min>max 原样拼成 "-Xmx1000000G" 等非法参数导致 JVM
+		// 启动失败。统一在拼接点走 heapsizeguard 归一（GB 口径、1TiB 上界、min<=max），
+		// 任何收敛都记录一次安全审计，便于排查被改脏的配置。
+		safeMin, safeMax, heapCodes := ResolveHeapSizesGB(config.MinMemory, config.MaxMemory)
+		if len(heapCodes) > 0 {
+			recordSecurityEvent(auditCategoryLaunch, auditSeverityWarn, auditActionStripped,
+				"minecraft", "游戏堆内存配置已归一: "+strings.Join(heapCodes, ","))
+		}
+		maxMem = FormatHeapSizeGB(safeMax)
+		minMem = FormatHeapSizeGB(safeMin)
+	}
+	nativesDir := filepath.Join(versionDir, versionID+"-natives")
+	classpathEntries := a.buildClasspath(mcDir, versionID, versionJSON)
+
+	// 最终归属验收（必须在 resolveJVMArg 使用 classpath 拼出 -cp 之前完成）：不相信
+	// buildClasspath 内各拼路径环节，对整条 classpath 统一收敛——必须全部是 .minecraft
+	// 内的绝对 .jar、无 UNC/穿越/控制符，并去重。越界条目剔除并留痕，用安全去重后的
+	// 条目重建 classpath；后续 Forge 过滤只会再收窄（仍是安全子集）。
+	cpAudit := AuditGameClasspath(classpathEntries, []string{mcDir})
+	for _, f := range cpAudit.Findings {
+		if f.Severity == launchSeverityCritical {
+			recordSecurityEvent(auditCategoryLaunch, auditSeverityCritical, auditActionBlocked,
+				"minecraft", "游戏 classpath 不安全条目已剔除: "+f.Code)
+		}
+	}
+	if len(cpAudit.SafeEntries) != len(classpathEntries) {
+		classpathEntries = cpAudit.SafeEntries
+	}
+	classpath := strings.Join(classpathEntries, ";")
+	if lpAudit := AuditGameLocalPaths(nativesDir, filepath.Join(mcDir, "libraries"),
+		filepath.Join(mcDir, "assets"), []string{mcDir}); lpAudit.HasCritical() {
+		recordSecurityEvent(auditCategoryLaunch, auditSeverityCritical, auditActionBlocked,
+			"minecraft", "游戏本地路径(natives/libraries/assets)审计未通过: "+lpAudit.FirstCriticalCode())
+	}
+	gameDir := versionDir
+	if !a.IsVersionIsolation() {
+		gameDir = mcDir
+	}
+
+	var jvmArgs []string
+	if isOldJSON {
+		jvmArgs = []string{
+			fmt.Sprintf("-Xmx%s", maxMem), fmt.Sprintf("-Xms%s", minMem),
+			fmt.Sprintf("-Djava.library.path=%s", nativesDir),
+			"-XX:+UnlockExperimentalVMOptions", "-XX:+UseG1GC",
+			"-XX:G1NewSizePercent=20", "-XX:G1ReservePercent=20",
+			"-XX:MaxGCPauseMillis=50", "-XX:G1HeapRegionSize=32M",
+		}
+	} else {
+		jvmArgs = []string{
+			fmt.Sprintf("-Xmx%s", maxMem), fmt.Sprintf("-Xms%s", minMem),
+			fmt.Sprintf("-Djava.library.path=%s", nativesDir),
+			fmt.Sprintf("-Dorg.lwjgl.librarypath=%s", nativesDir),
+		}
+		if versionJSON.Arguments != nil {
+			var untrusted []string
+			for _, arg := range versionJSON.Arguments.JVM {
+				untrusted = append(untrusted, resolveJVMArg(arg, nativesDir, mcDir, classpath, versionID)...)
+			}
+			// arguments.jvm 来自 Mojang/加载器下发的版本 JSON，本质上是外部数据。
+			// 被篡改或恶意的整合包版本 JSON 可在此塞入 -javaagent / -XX:OnError
+			// 等参数，在 JVM 启动阶段直接执行任意代码（见 filterUntrustedJvmArgs）。
+			safeJvmArgs, blockedJvmArgs, jvmArgTruncated := filterUntrustedJvmArgs(untrusted)
+			jvmArgs = append(jvmArgs, safeJvmArgs...)
+			for _, bad := range blockedJvmArgs {
+				a.writeLog("已拦截版本 JSON 中的危险 JVM 参数: %s", bad)
+			}
+			if jvmArgTruncated {
+				a.writeLog("版本 JSON 的 JVM 参数数量超过 %d，多余参数已丢弃", maxUntrustedJvmArgs)
+			}
+		}
+	}
+
+	isForgeNew := (strings.Contains(versionID, "forge") || strings.Contains(versionJSON.MainClass, "bootstraplauncher")) && javaEntry.MajorVer >= 17
+	if isForgeNew {
+		var filtered []string
+		for _, entry := range classpathEntries {
+			if strings.Contains(entry, "versions") && strings.HasSuffix(entry, ".jar") {
+				base := strings.ToLower(strings.TrimSuffix(filepath.Base(entry), ".jar"))
+				if !strings.Contains(base, "forge") && !strings.Contains(base, "fabric") &&
+					!strings.Contains(base, "neoforge") && !strings.Contains(base, "quilt") {
+					continue
+				}
+			}
+			filtered = append(filtered, entry)
+		}
+		classpathEntries = filtered
+		classpath = strings.Join(classpathEntries, ";")
+	}
+
+	isFabric := strings.Contains(versionID, "fabric") || strings.Contains(versionJSON.MainClass, "fabricmc") || strings.Contains(versionJSON.MainClass, "knot")
+	if isFabric && len(classpathEntries) > 0 {
+		var paths []string
+		for _, p := range classpathEntries {
+			paths = append(paths, "file:///"+strings.ReplaceAll(p, "\\", "/"))
+		}
+		jvmArgs = append(jvmArgs, "-Dfabric.classPathGroups=default:"+strings.Join(paths, ";"))
+	}
+	jvmArgs = deduplicateJvmArgs(jvmArgs)
+	// 安全缓解属性必须由启动器拍板：剔除来自启动器/版本 JSON/加载器的任何同名 -D
+	// （防止不可信 JSON 用后置 =false 覆盖 formatMsgNoLookups），并在 JVM 参数段
+	// 末尾统一下发 log4j 消息 lookup 关闭与 JNDI 远程 codebase 禁用。
+	jvmArgs = applyEnforcedJvmProperties(jvmArgs)
+
+	username := "Player"
+	currentUser, err := a.GetCurrentUser()
+	if err == nil && currentUser.Username != "" {
+		username = sanitizeLaunchUsername(currentUser.Username)
+	}
+	uuid := generateOfflineUUID(username)
+	accessToken := uuid
+	userType := "msa"
+
+	if currentUser.Type == UserTypePremium {
+		authData, authErr := a.GetMSAuthData(username)
+		if authErr == nil && authData.MCAccessToken != "" {
+			_ = a.RefreshMicrosoftToken(username)
+			authData, authErr = a.GetMSAuthData(username)
+			if authErr == nil {
+				uuid = authData.UUID
+				accessToken = authData.MCAccessToken
+				if len(uuid) == 32 {
+					uuid = fmt.Sprintf("%s-%s-%s-%s-%s", uuid[0:8], uuid[8:12], uuid[12:16], uuid[16:20], uuid[20:32])
+				}
+			}
+		}
+	}
+	if currentUser.Type == UserTypeExternal {
+		extData, extErr := a.GetExternalAuthData(username)
+		if extErr == nil && extData.AccessToken != "" {
+			_ = a.RefreshExternalToken(username)
+			extData, extErr = a.GetExternalAuthData(username)
+			if extErr == nil {
+				uuid = extData.UUID
+				accessToken = extData.AccessToken
+				if len(uuid) == 32 {
+					uuid = fmt.Sprintf("%s-%s-%s-%s-%s", uuid[0:8], uuid[8:12], uuid[12:16], uuid[16:20], uuid[20:32])
+				}
+			}
+		}
+	}
+
+	assetIndexName := ""
+	if versionJSON.AssetIndex != nil {
+		assetIndexName = versionJSON.AssetIndex.ID
+	}
+	replacements := map[string]string{
+		"${auth_player_name}": username, "${version_name}": versionID,
+		"${game_directory}": gameDir, "${assets_root}": filepath.Join(mcDir, "assets"),
+		"${assets_index_name}": assetIndexName, "${auth_uuid}": uuid,
+		"${auth_access_token}": accessToken, "${access_token}": accessToken,
+		"${auth_session}": accessToken, "${user_type}": userType,
+		"${version_type}": "QGL", "${user_properties}": "{}",
+		"${game_assets}": filepath.Join(mcDir, "assets", "virtual", "legacy"),
+		"${classpath}":   classpath, "${classpath_separator}": ";",
+		"${natives_directory}": nativesDir, "${library_directory}": filepath.Join(mcDir, "libraries"),
+		"${launcher_name}": "QGL", "${launcher_version}": "1.0.0",
+		"${resolution_width}": "854", "${resolution_height}": "480",
+	}
+
+	// 启动器自己生成、随后替换进游戏参数的可信值（账号用户名/UUID/会话令牌/资源索引
+	// ID）必须干净：它们一旦含空白、引号或 CR/LF，就会在被字符串替换拼进 argv 时劈开
+	// 额外参数（旧版 MinecraftArgs 是纯字符串替换，尤其敏感）。账号数据可能来自损坏的
+	// 本地账号文件或异常的第三方认证响应，这里统一做控制字符/超长兜底，命中即放弃启动。
+	reservedValues := map[string]string{
+		"username":    username,
+		"uuid":        uuid,
+		"accessToken": accessToken,
+		"assetIndex":  assetIndexName,
+		"version":     versionID,
+		"userType":    userType,
+	}
+	rvAudit := AuditReservedGameValues(reservedValues)
+	if rvAudit.HasCritical() {
+		for _, f := range rvAudit.Findings {
+			if f.Severity == launchSeverityCritical {
+				recordSecurityEvent(auditCategoryLaunch, auditSeverityCritical, auditActionRejected,
+					"minecraft", "启动器保留参数值异常: "+f.Code+" @ "+f.Field)
+			}
+		}
+		a.writeLog("账号/会话参数含非法控制字符或超长，放弃启动")
+		return nil, "", "", ""
+	}
+
+	var gameArgs []string
+	if isOldJSON {
+		for _, part := range strings.Split(versionJSON.MinecraftArgs, " ") {
+			arg := part
+			for k, v := range replacements {
+				arg = strings.ReplaceAll(arg, k, v)
+			}
+			gameArgs = append(gameArgs, arg)
+		}
+	}
+	if versionJSON.Arguments != nil {
+		for _, arg := range versionJSON.Arguments.Game {
+			gameArgs = append(gameArgs, resolveGameArg(arg, replacements)...)
+		}
+	}
+
+	// 游戏参数最终验收：旧版 MinecraftArgs 与 arguments.game 都来自外部版本 JSON。
+	// resolveGameArg 已挡住“一个值夹空格劈成多条”，这里再拦“本身合法成条”的会话劫持
+	// 参数（--server/--port/--quickPlay*/--proxy*，官方 JSON 绝不会自带）与控制字符/
+	// 超长值，并给条数上界。剔除劫持项后可继续；参数表被畸形放大则放弃启动。
+	gaAudit := AuditExternalGameArgs(gameArgs)
+	for _, f := range gaAudit.Findings {
+		if f.Severity == launchSeverityCritical {
+			recordSecurityEvent(auditCategoryLaunch, auditSeverityCritical, auditActionStripped,
+				"minecraft", "外部游戏参数审计: "+f.Code+" @ "+f.Field)
+		}
+	}
+	if gameFindingsContainCode(gaAudit.Findings, "ga-too-many") {
+		a.writeLog("外部游戏参数条数超过上限，放弃启动")
+		return nil, "", "", ""
+	}
+	gameArgs = gaAudit.SafeExternal
+
+	hasCp := false
+	for i, arg := range jvmArgs {
+		if arg == "-cp" && i+1 < len(jvmArgs) {
+			hasCp = true
+		}
+	}
+	var allArgs []string
+	if hasCp {
+		allArgs = append(jvmArgs, versionJSON.MainClass)
+	} else {
+		allArgs = append(jvmArgs, "-cp", classpath, versionJSON.MainClass)
+	}
+	allArgs = append(allArgs, gameArgs...)
+	return allArgs, classpath, username, gameDir
+}
+
+// maxUntrustedJvmArgs 限制“版本/加载器 JSON 提供的 JVM 参数”总条数。
+// 官方版本 JSON 的 JVM 参数只有十几条；Windows CreateProcess 命令行上限约
+// 32K 字符，异常巨大的参数表只会来自损坏或被篡改的文件，直接截断。
+const maxUntrustedJvmArgs = 256
+
+// dangerousJvmFlagPrefixes 是不允许由外部版本 JSON 提供的 JVM 参数前缀
+// （统一小写匹配）。这些参数能在 JVM 启动阶段加载任意字节码/原生库、
+// 执行外部命令或替换主类，等价于任意代码执行：
+//   - -javaagent / -agentlib / -agentpath：加载 JVMTI/Java agent
+//   - -XX:OnError / -XX:OnOutOfMemoryError：JVM 事件触发时执行系统命令
+//   - -XX:VMOptionsFile：从外部文件追加 JVM 参数，绕过本过滤
+//   - -XXaltjvm(s)：替换 JVM 实现目录
+//   - -Xrunjdwp/-Xrunhprof 等旧式 -Xrun 代理：开放 JDWP 远程调试即等同 RCE
+//   - -jar / -m(--module)：改由攻击者指定的 jar/模块作为入口运行
+//
+// 启动器自身生成的 -Xmx、-Djava.library.path、-cp、--add-opens 等在过滤
+// 完成之后才追加，不受影响；官方加载器使用的 -p/--module-path、--add-modules、
+// --enable-native-access 不在列表中。
+// 危险 JVM 参数的权威判定已抽到 jvmargs.go 的 jvmArgThreat，
+// 在原 -javaagent 等前缀之外补齐了 @argfile / -noverify / 动态 agent 加载等绕过形态。
+
+// isDangerousJvmFlag 判断单个 JVM 参数是否命中危险前缀。
+// 兼容 "flag:operand"、"flag=operand" 和 "flag operand"（下一条参数）两种写法。
+func isDangerousJvmFlag(lower string) bool {
+	dangerous, _ := jvmArgThreat(lower)
+	return dangerous
+}
+
+// filterUntrustedJvmArgs 过滤来自外部版本 JSON 的 JVM 参数。
+// 返回安全参数、被拦截参数（用于日志）以及是否因超过上限而截断。
+// 当危险参数以"独立 token + 下一参数为操作数"形式出现（如 -jar evil.jar），
+// 操作数参数会一并丢弃。
+func filterUntrustedJvmArgs(args []string) (safe []string, blocked []string, truncated bool) {
+	skipOperand := false
+	for i, arg := range args {
+		if skipOperand {
+			skipOperand = false
+			continue
+		}
+		lower := strings.ToLower(strings.TrimSpace(arg))
+		dangerous, consumesOperand := jvmArgThreat(lower)
+		if dangerous {
+			blocked = append(blocked, arg)
+			// 独立 token 形式时，下一条参数是其操作数（路径/命令），一并跳过。
+			if consumesOperand {
+				skipOperand = true
+			}
+			continue
+		}
+		safe = append(safe, arg)
+		if len(safe) >= maxUntrustedJvmArgs {
+			truncated = i+1 < len(args)
+			break
+		}
+	}
+	return safe, blocked, truncated
+}
+
+// expandConditionalArg 展开 arguments 数组里的一个元素，JVM 参数与游戏参数共用同一套逻辑：
+// 普通字符串逐占位替换后成 1 条；带 rules 的对象先用 shouldIncludeArg 按当前环境
+// 判定，再把其 value（字符串或字符串数组）逐项展开替换；不符合规则 / 取值畸形返回 nil。
+// 历史上 resolveJVMArg 与 resolveGameArg 各写一份且都内联手写替换循环，这里收口
+// 成一份，避免两份实现再漂移。
+func expandConditionalArg(arg interface{}, repl map[string]string) []string {
+	apply := func(s string) string {
+		for k, v := range repl {
+			s = strings.ReplaceAll(s, k, v)
+		}
+		return s
+	}
+	switch v := arg.(type) {
+	case string:
+		return []string{apply(v)}
+	case map[string]interface{}:
+		if !shouldIncludeArg(v) {
+			return nil
+		}
+		values, ok := v["value"]
+		if !ok {
+			return nil
+		}
+		switch val := values.(type) {
+		case string:
+			return []string{apply(val)}
+		case []interface{}:
+			var result []string
+			for _, item := range val {
+				if s, isString := item.(string); isString {
+					result = append(result, apply(s))
+				}
+			}
+			return result
+		}
+	}
+	return nil
+}
+
+func resolveJVMArg(arg interface{}, nativesDir, mcDir, classpath, versionID string) []string {
+	return expandConditionalArg(arg, map[string]string{
+		"${natives_directory}":   nativesDir,
+		"${library_directory}":   filepath.Join(mcDir, "libraries"),
+		"${libraries_directory}": filepath.Join(mcDir, "libraries"),
+		"${classpath_separator}": ";",
+		"${classpath}":           classpath,
+		"${launcher_name}":       "QGL",
+		"${launcher_version}":    "1.0.0",
+		"${version_name}":        versionID,
+	})
+}
+
+func resolveGameArg(arg interface{}, repl map[string]string) []string {
+	return expandConditionalArg(arg, repl)
+}
+
+// sanitizePathComponent 验证路径组件不含路径遍历字符
+func sanitizePathComponent(name string) error {
+	if name == "" || name == "." || name == ".." {
+		return fmt.Errorf("无效的路径组件: %s", name)
+	}
+	if strings.Contains(name, "..") || strings.ContainsAny(name, `/\:*?"<>|`) {
+		return fmt.Errorf("无效的路径组件: %s", name)
+	}
+	return nil
+}
+
+// localArtifactMissing 报告目标文件是否不存在或为 0 字节（下载中断/被清理的典型形态）。
+func localArtifactMissing(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil {
+		return true
+	}
+	return info.IsDir() || info.Size() == 0
+}
+
+// fixMissingLibraries 在启动前补齐版本清单要求、但本地缺失（或为空）的库与 Windows
+// 本地库。它只复用版本安装阶段那条已审计的安全下载链：主机白名单在
+// downloadVerifiedFile 内强制、相对路径走 SafeMavenRelPath 防 Zip Slip、SHA1 用清单
+// 官方锚校验；本函数绝不新增任何旁路。已存在且非空的文件不重下（侧车复核仍在
+// downloadVerifiedFile / verifyCachedFile 一侧，这里只为“缺失”场景补下载）。
+func (a *App) fixMissingLibraries(mcDir string, versionJSON *VersionJSON) {
+	if versionJSON == nil {
+		return
+	}
+	winEnv := ruleEnv{osName: "windows", osArch: currentRuleEnv().osArch}
+	libsDir := filepath.Join(mcDir, "libraries")
+
+	fetchArtifact := func(art *LibArtifact, label string) {
+		if art == nil {
+			return
+		}
+		safeRel := SafeMavenRelPath(art.Path)
+		if safeRel == "" {
+			a.writeLog("补全库时跳过不安全路径: %s", art.Path)
+			return
+		}
+		dest := filepath.Join(libsDir, filepath.FromSlash(safeRel))
+		if !localArtifactMissing(dest) {
+			return
+		}
+		a.emitProgress("downloading", filepath.Base(safeRel), 0, art.Size)
+		if err := a.downloadVerifiedFile(rewriteLauncherURLToBMCL(art.URL), dest, art.SHA1, false); err != nil {
+			a.writeLog("补全库文件失败(跳过): %s, %v", label, err)
+		}
+	}
+
+	for i := range versionJSON.Libraries {
+		lib := &versionJSON.Libraries[i]
+		if !a.shouldIncludeLib(*lib) || lib.Downloads == nil {
+			continue
+		}
+		fetchArtifact(lib.Downloads.Artifact, lib.Name)
+		if lib.Natives != nil && lib.Downloads.Classifiers != nil {
+			if nativeKey, ok := resolveWindowsNativeKey(lib.Natives, winEnv); ok {
+				fetchArtifact(lib.Downloads.Classifiers[nativeKey], lib.Name+":"+nativeKey)
+			}
+		}
+	}
+}
+
+func (a *App) LaunchGame(versionID string) error {
+	if err := sanitizePathComponent(versionID); err != nil {
+		return fmt.Errorf("无效的版本ID: %v", err)
+	}
+	mcDir := a.getMinecraftDir()
+	versionDir := filepath.Join(mcDir, "versions", versionID)
+	a.launchLogPath = filepath.Join(versionDir, "QGL", "Logs", "qgl_launch.log")
+	a.writeLog("===== 启动游戏: %s =====", versionID)
+	a.writeLog("版本目录: %s", versionDir)
+
+	// 拉起 JVM 前对 mods 目录做存量安全扫描（通用恶意形态 + Log4Shell/JNDI），
+	// 覆盖手动拖入 / 其它启动器写入、从未经本程序校验的 jar；命中高危直接拒绝启动。
+	if err := a.enforceInstalledModsBeforeLaunch(versionID); err != nil {
+		return err
+	}
+
+	// mods 完整性审计闸门：基线存在时对账目录，发现被篡改的 mod 默认拦截启动，
+	// 除非用户显式开启强制放行（SetModsAuditForceLaunch）。新增 / 缺失仅提示。
+	if err := a.enforceModsAuditBeforeLaunch(versionID); err != nil {
+		return err
+	}
+
+	// 实例并发启动锁：同一版本实例同时只能有一个 JVM 在跑（防止两个进程并发
+	// 读写世界存档 / 配置 / 日志互相踩踏）。上锁失败直接拦截；锁在游戏进程
+	// 退出后由 watchGameProcess 释放，进程被强杀时靠过期时长兜底接管。
+	if _, err := a.acquireInstanceLock(versionID); err != nil {
+		return err
+	}
+
+	versionJSON, err := a.resolveVersionJSON(versionID)
+	if err != nil {
+		return fmt.Errorf("解析版本 JSON 失败: %v", err)
+	}
+
+	runtime.EventsEmit(a.ctx, "launchStatus", "fixing")
+	a.emitProgress("downloading", "补全文件中", 0, 0)
+	a.fixMissingLibraries(mcDir, versionJSON)
+
+	nativesDir := filepath.Join(versionDir, versionID+"-natives")
+	if err := os.MkdirAll(nativesDir, 0700); err != nil {
+		return fmt.Errorf("创建 natives 目录失败: %v", err)
+	}
+	a.extractNativesFromJSON(mcDir, nativesDir, versionJSON)
+	if empty, _ := isDirEmpty(nativesDir); empty {
+		a.ensureNativesForLoader(mcDir, versionID, versionDir, nativesDir, versionJSON)
+	}
+
+	allArgs, _, _, gameDir := a.buildLaunchArgs(versionID, versionJSON, mcDir, versionDir)
+
+	currentUser, _ := a.GetCurrentUser()
+	if currentUser.Type == UserTypeExternal {
+		username := currentUser.Username
+		extData, extErr := a.GetExternalAuthData(username)
+		if extErr == nil {
+			injectorPath, injErr := a.GetAuthlibInjectorPath()
+			if injErr == nil {
+				serverURL := extData.ServerURL
+				prefetched := ""
+				if isHTTPSURL(serverURL) {
+					resp, err := safeHTTPClient().Get(serverURL)
+					if err == nil {
+						// 皮肤站首页本应几 KB；上限 1MiB，防止恶意服务器返回超大响应把
+						// JVM 命令行撑爆。走统一有界读内核（多读 1 字节精确判定超限），
+						// 读体中断或超量都不预取，而不是像旧实现那样吞掉读错、拿半截内容。
+						body, readErr := readBoundedBody(resp.Body, maxAuthlibPrefetchBytes)
+						resp.Body.Close()
+						if readErr == nil {
+							prefetched = base64.StdEncoding.EncodeToString(body)
+						}
+					}
+				}
+				injectorArgs := []string{"-javaagent:" + injectorPath + "=" + serverURL, "-Dauthlibinjector.side=client"}
+				if prefetched != "" {
+					injectorArgs = append(injectorArgs, "-Dauthlibinjector.yggdrasil.prefetched="+prefetched)
+				}
+				allArgs = append(injectorArgs, allArgs...)
+			}
+		}
+	}
+
+	a.setGameLanguage(gameDir, versionID)
+
+	javaEntry, _ := a.SelectJavaForVersion(versionID)
+	javaPath := javaEntry.Path
+
+	// 启动预检：Java 二进制必须是常规文件（Windows 拒绝重解析点/符号链接，防
+	// 配置项被换成指向任意程序的链接入口）；游戏目录 / natives 目录必须就绪；
+	// 磁盘剩余空间低于安全水位时提示。critical 问题直接拒绝启动。
+	preflightIssues, preflightBlocked := aggregatePreflight(
+		checkJavaBinary(javaPath),
+		checkGameDirs(gameDir, nativesDir),
+		checkDiskHeadroom(gameDir, preflightMinFreeBytes),
+		checkSymlinkTraps(gameDir),
+	)
+	for _, it := range preflightIssues {
+		recordSecurityEvent("launch-preflight", auditSeverityWarn, auditActionDetected,
+			"minecraft", "预检["+it.Code+"] "+it.Text)
+	}
+	if preflightBlocked {
+		recordSecurityEvent("launch-preflight", auditSeverityCritical, auditActionBlocked,
+			"minecraft", "启动预检未通过，拒绝启动")
+		return fmt.Errorf("启动预检未通过，拒绝启动")
+	}
+
+	// 关键配置防篡改基线：Java 路径 / 游戏目录 / 版本选择等启动执行目标字段若在
+	// 两次本进程会话之间被外部改动（木马把 javaPath 换成自己投放的 exe），
+	// 静态预检看不出来——这里按基线 diff 拒绝启动，防配置投毒。
+	if cfg, cfgErr := a.GetGlobalConfig(); cfgErr == nil {
+		ucfg, ucfgErr := a.GetUserConfig(currentUser.Username)
+		if ucfgErr != nil {
+			ucfg = &UserConfig{}
+		}
+		if baselineErr := a.CheckConfigGuardBaseline(a.configSnapshotOf(cfg, ucfg)); baselineErr != nil {
+			return baselineErr
+		}
+	}
+
+	// 启动参数快照：把“用什么启动”落一份脱敏快照（Java 路径 / 版本 / 内存 /
+	// auth 类型 / mods 数量 / 预检结果），与 session journal 互补——日后审计只
+	// 看结果不看配置的问题由本模块补上。快照不含任何 token，只记类型。
+	authTypeLabel := "offline"
+	switch currentUser.Type {
+	case UserTypePremium:
+		authTypeLabel = "microsoft"
+	case UserTypeExternal:
+		authTypeLabel = "external"
+	}
+	// 堆内存与启动参数同源（heapsizeguard 归一后的 safeMax），快照记录 MB 口径。
+	maxMemMB := 2048
+	if config, cfgErr := a.GetGlobalConfig(); cfgErr == nil && config != nil {
+		_, safeMaxGB, _ := ResolveHeapSizesGB(config.MinMemory, config.MaxMemory)
+		maxMemMB = safeMaxGB * 1024
+	}
+	modsCount := 0
+	if modsDir, errDir := filepath.Abs(filepath.Join(mcDir, "mods")); errDir == nil {
+		if entries, errLs := os.ReadDir(modsDir); errLs == nil {
+			modsCount = len(entries)
+		}
+	}
+	a.recordLaunchSnapshot(buildLaunchSnapshot(
+		versionID, javaPath, javaEntry.Version, authTypeLabel,
+		maxMemMB, modsCount, currentUser.Type == UserTypePremium, preflightBlocked, len(preflightIssues),
+	))
+
+	cmdParts := []string{syscall.EscapeArg(javaPath)}
+	for _, arg := range allArgs {
+		cmdParts = append(cmdParts, syscall.EscapeArg(arg))
+	}
+	fullCmdLine := strings.Join(cmdParts, " ")
+	a.writeLog("命令行长度: %d 字符", len(fullCmdLine))
+
+	// 最终防线：真正被 CreateProcess 解释的是上面拼好的整条字符串（SysProcAttr.CmdLine），
+	// 其中混入了版本 JSON、账号、外部认证服务器 URL 等多源数据。在启动前按系统分词规则
+	// 还原 argv 并审计：拒绝 CR/LF/NUL 注入、引号不配平、超长串/参数，以及 argv[0] 必须
+	// 仍是安全的 java 可执行。critical 一律不启动游戏。
+	if _, cmdAudit := AuditCommandLine(fullCmdLine, true); cmdAudit.HasCritical() {
+		recordSecurityEvent(auditCategoryJVMEnv, auditSeverityCritical, auditActionBlocked,
+			"minecraft", "游戏启动命令行最终审计未通过: "+cmdAudit.FirstCriticalCode())
+		return fmt.Errorf("游戏启动命令行安全审计未通过，拒绝启动: %s", cmdAudit.FirstCriticalCode())
+	}
+
+	cmd := exec.Command(javaPath)
+	cmd.Dir = gameDir
+	cmd.SysProcAttr = &syscall.SysProcAttr{CmdLine: fullCmdLine}
+
+	// 子进程默认会继承启动器的全部环境变量，而 JAVA_TOOL_OPTIONS /
+	// _JAVA_OPTIONS / JDK_JAVA_OPTIONS 等会被 JVM 在启动时自动当作额外参数
+	// 加载，绕过我们对版本 JSON 与 JVM 参数的危险参数过滤（可注入任意
+	// javaagent / 本地代理）。这里显式下发净化后的环境，只剥掉这一族变量。
+	gameEnv, strippedEnv := currentGameEnvironment(nil)
+	cmd.Env = gameEnv
+	for _, name := range strippedEnv {
+		a.writeLog("安全: 已从游戏进程环境中剥离隐式 JVM 参数变量: %s", name)
+	}
+	// DLL 搜索顺序劫持防护：PATH 只保留系统目录 + Java 目录，剔除用户可写
+	// 目录（Downloads / Temp / 网盘同步目录等），防止同名恶意 DLL 被加载进
+	// 游戏进程。被剔除条目落审计日志（最多列 10 条，完整计数保留）。
+	gameEnv, droppedPath, droppedPathList := sanitizeGameEnv(gameEnv, filepath.Dir(javaPath))
+	if droppedPath > 0 {
+		recordSecurityEvent(auditCategoryJVMEnv, auditSeverityWarn, auditActionDetected,
+			"minecraft", fmt.Sprintf("已从游戏进程 PATH 剔除 %d 个非系统目录（防 DLL 劫持），例: %s",
+				droppedPath, strings.Join(droppedPathList, "; ")))
+	}
+	cmd.Env = gameEnv
+	if len(strippedEnv) > 0 {
+		// 只记录变量名（值可能含敏感路径/令牌），作为"环境被人动过"的留痕。
+		recordSecurityEvent(auditCategoryJVMEnv, auditSeverityWarn, auditActionStripped,
+			"minecraft", "启动游戏时剥离隐式 JVM 参数环境变量: "+strings.Join(strippedEnv, ","))
+	}
+
+	stdoutPipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("创建 stdout 管道失败: %v", err)
+	}
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("创建 stderr 管道失败: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("启动游戏失败: %v", err)
+	}
+	pid := cmd.Process.Pid
+	processStartTime := time.Now()
+	a.writeLog("游戏进程 PID: %d", pid)
+	a.recordSessionStart(versionID, pid)
+
+	go a.watchGameProcess(cmd, stdoutPipe, stderrPipe, pid, processStartTime, versionID)
+	return nil
+}
+
+func (a *App) GetLaunchCommand(versionID string) (string, error) {
+	if err := sanitizePathComponent(versionID); err != nil {
+		return "", fmt.Errorf("无效的版本ID: %v", err)
+	}
+	mcDir := a.getMinecraftDir()
+	versionDir := filepath.Join(mcDir, "versions", versionID)
+	versionJSON, err := a.resolveVersionJSON(versionID)
+	if err != nil {
+		return "", fmt.Errorf("解析版本 JSON 失败: %v", err)
+	}
+	a.fixMissingLibraries(mcDir, versionJSON)
+	nativesDir := filepath.Join(versionDir, versionID+"-natives")
+	// natives 目录由 extractNativesFromJSON 内部统一以 0700 创建/收权。
+	a.extractNativesFromJSON(mcDir, nativesDir, versionJSON)
+	if empty, _ := isDirEmpty(nativesDir); empty {
+		a.ensureNativesForLoader(mcDir, versionID, versionDir, nativesDir, versionJSON)
+	}
+	allArgs, _, _, _ := a.buildLaunchArgs(versionID, versionJSON, mcDir, versionDir)
+	javaEntry, _ := a.SelectJavaForVersion(versionID)
+	javaPath := javaEntry.Path
+
+	cmdParts := []string{syscall.EscapeArg(javaPath)}
+	for _, arg := range allArgs {
+		cmdParts = append(cmdParts, syscall.EscapeArg(arg))
+	}
+	return strings.Join(cmdParts, " "), nil
+}
+
+// dumpCrashContext 在判定崩溃后读取“本局”（startTime 之后）新生成的
+// crash-reports / hs_err 崩溃产物摘要，追加到崩溃原因；找不到或读取失败都静默
+// 退化为原原因，绝不阻塞崩溃上报。gameDir 即游戏进程的工作目录（cmd.Dir）。
+func (a *App) dumpCrashContext(reason, gameDir string, startTime time.Time) string {
+	// 崩溃上下文统一脱敏（用户目录 / QGL 根 / 游戏目录 / JWT / 长十六进制），
+	// 防止 hs_err 里的绝对路径与令牌被贴到论坛或经错误通道外发。
+	if gameDir == "" {
+		return redactCrashText(reason, a.GetQGLDir(), "", a.currentUsername())
+	}
+	if s, ok := collectLatestCrashDump(gameDir, startTime); ok {
+		extra := renderCrashDumpSummary(s)
+		combined := extra
+		if reason != "" {
+			combined = reason + "\n" + extra
+		}
+		return redactCrashText(combined, a.GetQGLDir(), gameDir, a.currentUsername())
+	}
+	return redactCrashText(reason, a.GetQGLDir(), gameDir, a.currentUsername())
+}
+
+func (a *App) watchGameProcess(cmd *exec.Cmd, stdoutPipe io.Reader, stderrPipe io.Reader, pid int, processStartTime time.Time, versionID string) {
+	// 实例锁在本函数退出（游戏进程结束 / 启动失败 / 超时）时统一释放。
+	defer a.releaseInstanceLock(versionID, "")
+	// 会话台账结算：无论从哪条路径退出（正常/崩溃/超时/立即退出），都记一条
+	// 结局。各 return 前先更新本组变量，defer 在函数尾统一写盘。
+	sessionOutcome := SessionOutcomeOk
+	sessionExitCode := -1
+	sessionDetail := ""
+	defer func() {
+		a.recordSessionEnd(versionID, pid, sessionExitCode, sessionOutcome, sessionDetail)
+		// 会话日志：函数退出时统一落盘 + 轮转（与台账结算同一时机，避免漏记尾部）。
+		a.EndGameSessionLog()
+	}()
+	// 会话日志：本局日志脱敏持久化从这里开始。
+	if err := a.BeginGameSessionLog(versionID); err != nil {
+		a.writeLog("会话日志初始化失败: %v", err)
+	}
+	runtime.EventsEmit(a.ctx, "launchStatus", "launching")
+	crashDetected, windowFound := false, false
+	crashReason := ""
+	logProgress := 0
+	var recentLines []string
+	exitChan := make(chan int, 1)
+	go func() {
+		err := cmd.Wait()
+		exitCode := -1
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				exitCode = exitErr.ExitCode()
+			}
+		} else {
+			exitCode = 0
+		}
+		exitChan <- exitCode
+	}()
+	logChan := make(chan string, 200)
+	// 有界流式按行读取：替换默认 bufio.Scanner（单行 64KiB 上限会被超长日志行
+	// 静默打断，导致崩溃/进度检测失效；盲目放大缓冲又会被无换行巨行 OOM）。
+	// 两个管道都 EOF 后关闭 logChan，让消费 goroutine 能随游戏退出而结束。
+	var logWG sync.WaitGroup
+	logWG.Add(2)
+	pipeGameLog := func(r io.Reader) {
+		defer logWG.Done()
+		_, truncated, _ := streamBoundedLines(r, maxGameLogLineBytes, func(line string) {
+			logChan <- line
+		})
+		if truncated > 0 {
+			recordSecurityEvent("game-log", auditSeverityWarn, auditActionStripped,
+				"minecraft", fmt.Sprintf("游戏输出有 %d 行超过 %d 字节单行上限，已截断(防内存膨胀)",
+					truncated, maxGameLogLineBytes))
+		}
+	}
+	go pipeGameLog(stdoutPipe)
+	go pipeGameLog(stderrPipe)
+	go func() {
+		logWG.Wait()
+		close(logChan)
+	}()
+	go func() {
+		for line := range logChan {
+			recentLines = append(recentLines, line)
+			if len(recentLines) > 50 {
+				recentLines = recentLines[len(recentLines)-50:]
+			}
+			// 会话日志：脱敏后进环形缓冲，会话结束统一落盘。
+			a.AppendGameSessionLine(line)
+			for _, kw := range crashKeywords {
+				if strings.Contains(line, kw) {
+					crashDetected = true
+					start := len(recentLines) - 20
+					if start < 0 {
+						start = 0
+					}
+					crashReason = buildCrashContext(recentLines[start:])
+					break
+				}
+			}
+			for _, kw := range logProgressKeywords {
+				if strings.Contains(line, kw.keyword) && kw.level > logProgress {
+					logProgress = kw.level
+				}
+			}
+			if logProgress >= 5 && !windowFound {
+				windowFound = true
+				runtime.EventsEmit(a.ctx, "launchStatus", "success")
+			}
+		}
+	}()
+	startTime := time.Now()
+	launchTimeout := 30 * time.Second
+	for {
+		elapsed := time.Since(startTime)
+		if !windowFound {
+			found, _ := findMinecraftWindow(pid, processStartTime)
+			if found {
+				windowFound = true
+				runtime.EventsEmit(a.ctx, "launchStatus", "success")
+				select {
+				case exitCode := <-exitChan:
+					if exitCode != 0 {
+						sessionOutcome = SessionOutcomeCrash
+						sessionExitCode = exitCode
+						runtime.EventsEmit(a.ctx, "launchStatus", "crashed")
+						runtime.EventsEmit(a.ctx, "crashInfo", fmt.Sprintf("游戏已退出 (退出码: %d)", exitCode))
+					} else {
+						sessionOutcome = SessionOutcomeOk
+						sessionExitCode = 0
+					}
+				}
+				return
+			}
+		}
+		select {
+		case exitCode := <-exitChan:
+			a.writeLog("游戏进程退出，退出码: %d, 运行时间: %.1f秒", exitCode, elapsed.Seconds())
+			if !windowFound {
+				logContext := ""
+				if len(recentLines) > 0 {
+					start := len(recentLines) - 20
+					if start < 0 {
+						start = 0
+					}
+					logContext = "\n\n最近日志:\n" + buildCrashContext(recentLines[start:])
+				}
+				// 控制台没说清真因时，补读本局 crash-reports / hs_err 崩溃产物。
+				if dump := a.dumpCrashContext("", cmd.Dir, processStartTime); dump != "" {
+					logContext += "\n\n崩溃诊断:\n" + dump
+				}
+				if elapsed < 3*time.Second {
+					sessionOutcome = SessionOutcomeLaunchFail
+					runtime.EventsEmit(a.ctx, "launchStatus", "crashed")
+					runtime.EventsEmit(a.ctx, "crashInfo", sanitizeLogLine(fmt.Sprintf("游戏启动失败，进程立即退出 (退出码: %d)%s", exitCode, logContext)))
+				} else {
+					sessionOutcome = SessionOutcomeCrash
+					runtime.EventsEmit(a.ctx, "launchStatus", "crashed")
+					runtime.EventsEmit(a.ctx, "crashInfo", sanitizeLogLine(fmt.Sprintf("游戏进程意外退出 (退出码: %d)%s", exitCode, logContext)))
+				}
+				sessionExitCode = exitCode
+				sessionDetail = logContext
+			} else {
+				if exitCode != 0 {
+					sessionOutcome = SessionOutcomeCrash
+				} else {
+					sessionOutcome = SessionOutcomeOk
+				}
+				sessionExitCode = exitCode
+			}
+			return
+		default:
+		}
+		if crashDetected && !windowFound {
+			select {
+			case <-exitChan:
+			case <-time.After(5 * time.Second):
+			}
+			crashReason = a.dumpCrashContext(crashReason, cmd.Dir, processStartTime)
+			sessionOutcome = SessionOutcomeCrash
+			sessionDetail = crashReason
+			runtime.EventsEmit(a.ctx, "launchStatus", "crashed")
+			runtime.EventsEmit(a.ctx, "crashInfo", sanitizeLogLine(crashReason))
+			return
+		}
+		if elapsed > launchTimeout && !windowFound {
+			if logProgress >= 2 && elapsed < 60*time.Second {
+				// 继续等待
+			} else {
+				sessionOutcome = SessionOutcomeTimeout
+				runtime.EventsEmit(a.ctx, "launchStatus", "timeout")
+				return
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}

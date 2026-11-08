@@ -50,12 +50,7 @@ type BanListAudit struct {
 }
 
 func (a BanListAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f BanFinding) bool { return f.Blocking })
 }
 
 func (a BanListAudit) HasWarnings() bool {

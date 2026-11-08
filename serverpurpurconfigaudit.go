@@ -43,16 +43,11 @@ func (a *PurpurAudit) add(file, reason, detail string, blocking bool) {
 }
 
 func (a *PurpurAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f PurpurFinding) bool { return f.Blocking })
 }
 
 func (a *PurpurAudit) HasWarnings() bool {
-	return len(a.Findings) > 0
+	return hasAny(a.Findings)
 }
 
 func (a *PurpurAudit) Describe() string {

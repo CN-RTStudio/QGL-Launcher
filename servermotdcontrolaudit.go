@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"unicode/utf8"
 )
@@ -62,34 +61,16 @@ func (a *MotdControlAudit) HasWarnings() bool {
 }
 
 func (a *MotdControlAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return "服务器 MOTD 文本未发现控制字符风险"
-	}
-	sorted := make([]MotdControlFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Reason != sorted[j].Reason {
-			return sorted[i].Reason < sorted[j].Reason
-		}
-		return sorted[i].Detail < sorted[j].Detail
-	})
-	var b strings.Builder
-	for i, f := range sorted {
-		if i >= 10 {
-			b.WriteString(fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		if i > 0 {
-			b.WriteString("；")
-		}
-		b.WriteString(f.Reason)
-		if f.Detail != "" {
-			b.WriteString("(")
-			b.WriteString(f.Detail)
-			b.WriteString(")")
-		}
-	}
-	return b.String()
+	return describeAuditFindings("服务器 MOTD 文本未发现控制字符风险", a.Findings, 10,
+		func(f MotdControlFinding) []string {
+			return []string{f.Reason, f.Detail}
+		},
+		func(f MotdControlFinding) string {
+			if f.Detail == "" {
+				return f.Reason
+			}
+			return f.Reason + "(" + f.Detail + ")"
+		})
 }
 
 func smcReadLines(serverDir string, a *MotdControlAudit) ([]string, bool) {

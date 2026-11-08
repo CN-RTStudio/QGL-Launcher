@@ -55,12 +55,7 @@ type TickConfigAudit struct {
 }
 
 func (a TickConfigAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f TickConfigFinding) bool { return f.Blocking })
 }
 
 func (a TickConfigAudit) HasWarnings() bool {

@@ -75,12 +75,7 @@ type ServerPortAudit struct {
 }
 
 func (a ServerPortAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f ServerPortFinding) bool { return f.Blocking })
 }
 
 func (a ServerPortAudit) HasWarnings() bool {
@@ -147,6 +142,14 @@ func pxParseProperties(text string) map[string]string {
 func pxParsePort(value string) (int, bool) {
 	value = strings.TrimSpace(value)
 	if value == "" {
+		return 0, false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < '0' || value[i] > '9' {
+			return 0, false
+		}
+	}
+	if len(value) > 1 && value[0] == '0' {
 		return 0, false
 	}
 	port, err := strconv.Atoi(value)

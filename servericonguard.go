@@ -215,7 +215,7 @@ func AuditServerIcon(serverDir string) IconAudit {
 			audit.add(name, iconReasonTooLarge, "图标文件超过预算", true)
 			continue
 		}
-		data, err := os.ReadFile(path)
+		data, err := readBoundedFile(path, auditTextReadMaxBytes)
 		if err != nil {
 			audit.add(name, iconReasonUnreadable, "图标不可读", true)
 			continue

@@ -375,8 +375,7 @@ func downloadAuthlibJarFromCandidates(jarPath string, candidates []string, expec
 			}
 			// 用 O_EXCL 写同目录临时文件，绝不直接 O_TRUNC 覆盖正在被使用的 jar。
 			dir := filepath.Dir(jarPath)
-			tmp, err := os.OpenFile(filepath.Join(dir, ".authlib-*.jar.tmp"),
-				os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+			tmp, err := os.CreateTemp(dir, ".authlib-*.jar.tmp")
 			if err != nil {
 				return fmt.Errorf("创建临时文件失败: %w", err)
 			}

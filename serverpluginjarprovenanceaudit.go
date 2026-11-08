@@ -69,12 +69,7 @@ type PluginJarAudit struct {
 }
 
 func (a PluginJarAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f PluginJarFinding) bool { return f.Blocking })
 }
 
 func (a PluginJarAudit) HasWarnings() bool {

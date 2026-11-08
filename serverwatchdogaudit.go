@@ -52,16 +52,11 @@ func (a *WatchdogAudit) add(file, reason, detail string, blocking bool) {
 }
 
 func (a *WatchdogAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f WatchdogFinding) bool { return f.Blocking })
 }
 
 func (a *WatchdogAudit) HasWarnings() bool {
-	return len(a.Findings) > 0
+	return hasAny(a.Findings)
 }
 
 func (a *WatchdogAudit) Describe() string {

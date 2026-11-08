@@ -120,18 +120,7 @@ func sbmParseConf(text string) map[string]string {
 }
 
 func sbmBool(props map[string]string, key string) (bool, bool) {
-	value, ok := props[strings.ToLower(key)]
-	if !ok {
-		return false, false
-	}
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "true", "yes", "on", "1":
-		return true, true
-	case "false", "no", "off", "0":
-		return false, true
-	default:
-		return false, false
-	}
+	return propsLookupBool(props, key)
 }
 
 func AuditServerBlueMap(serverDir string) *BlueMapAudit {

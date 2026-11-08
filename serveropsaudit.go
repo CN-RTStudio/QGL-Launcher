@@ -95,15 +95,7 @@ func soaValidUUID(value string) bool {
 }
 
 func soaValidName(value string) bool {
-	if value == "" || len(value) > 16 {
-		return false
-	}
-	for _, c := range value {
-		if (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' {
-			return false
-		}
-	}
-	return true
+	return propsValidName(value)
 }
 
 func AuditServerOpsJson(serverDir string) *OpsJsonAudit {

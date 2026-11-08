@@ -91,18 +91,7 @@ func spdLoadText(a *DynmapAudit, root, rel string, maxBytes int64) (string, bool
 }
 
 func spdBool(props map[string]string, key string) (bool, bool) {
-	value, ok := props[strings.ToLower(key)]
-	if !ok {
-		return false, false
-	}
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "true", "yes", "on", "1":
-		return true, true
-	case "false", "no", "off", "0":
-		return false, true
-	default:
-		return false, false
-	}
+	return propsLookupBool(props, key)
 }
 
 func spdPortConflict(serverPort, webPort int) bool {

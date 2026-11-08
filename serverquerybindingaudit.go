@@ -86,29 +86,11 @@ func sqbLoadText(a *QueryBindingAudit, root, rel string, maxBytes int64) (string
 }
 
 func sqbBool(props map[string]string, key string) (bool, bool) {
-	value, ok := props[strings.ToLower(key)]
-	if !ok {
-		return false, false
-	}
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "true", "yes", "on", "1":
-		return true, true
-	case "false", "no", "off", "0":
-		return false, true
-	}
-	return false, false
+	return propsLookupBool(props, key)
 }
 
 func sqbPort(props map[string]string, key string) (int, bool, bool) {
-	value, ok := props[strings.ToLower(key)]
-	if !ok {
-		return 0, false, false
-	}
-	n, valid := cfgParseInt(value)
-	if !valid {
-		return 0, true, false
-	}
-	return n, true, true
+	return propsLookupInt(props, key)
 }
 
 func sqbIsWildcardHost(host string) bool {

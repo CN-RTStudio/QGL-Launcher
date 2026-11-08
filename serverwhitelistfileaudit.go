@@ -85,15 +85,7 @@ func swfValidUUID(value string) bool {
 }
 
 func swfValidName(value string) bool {
-	if value == "" || len(value) > 16 {
-		return false
-	}
-	for _, c := range value {
-		if (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' {
-			return false
-		}
-	}
-	return true
+	return propsValidName(value)
 }
 
 func AuditServerWhitelistFile(serverDir string) *WhitelistFileAudit {

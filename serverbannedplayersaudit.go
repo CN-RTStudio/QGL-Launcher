@@ -48,16 +48,11 @@ func (a *BannedPlayerAudit) add(file, reason, detail string, blocking bool) {
 }
 
 func (a *BannedPlayerAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f BannedPlayerFinding) bool { return f.Blocking })
 }
 
 func (a *BannedPlayerAudit) HasWarnings() bool {
-	return len(a.Findings) > 0
+	return hasAny(a.Findings)
 }
 
 func (a *BannedPlayerAudit) Describe() string {

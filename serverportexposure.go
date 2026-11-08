@@ -132,7 +132,7 @@ func AuditServerPortExposure(serverDir string) (PortExposureAudit, error) {
 		})
 		return audit, nil
 	}
-	data, err := os.ReadFile(audit.Path)
+	data, err := readBoundedFile(audit.Path, auditTextReadMaxBytes)
 	if err != nil {
 		return audit, err
 	}

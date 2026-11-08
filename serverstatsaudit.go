@@ -62,12 +62,7 @@ func (a StatsAudit) Blocking() bool {
 }
 
 func (a StatsAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != stReasonOK {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f StatsFinding) bool { return !f.Blocking && f.Reason != stReasonOK })
 }
 
 func (a StatsAudit) Describe() string {

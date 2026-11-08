@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -67,24 +66,7 @@ func (a *EntityCrammingAudit) Describe() string {
 }
 
 func secLoadText(a *EntityCrammingAudit, root, rel string, maxBytes int64) (string, bool) {
-	path := filepath.Join(root, rel)
-	if sym, serr := isSymlinkOrSpecial(path); serr == nil && sym {
-		a.add(rel, secReasonSymlink, "配置文件为符号链接或特殊文件", true)
-		return "", false
-	}
-	data, err := readBoundedFile(path, maxBytes)
-	if err != nil {
-		if _, serr := os.Lstat(path); serr != nil {
-			return "", false
-		}
-		if errors.Is(err, errLocalFileTooLarge) {
-			a.add(rel, secReasonTooLarge, fmt.Sprintf("配置文件超过 %d 字节", maxBytes), true)
-			return "", false
-		}
-		a.add(rel, secReasonUnread, "配置文件不可读", false)
-		return "", false
-	}
-	return string(data), true
+	return loadServerText(root, rel, maxBytes, a.add)
 }
 
 func secWorldKeys(flat map[string]string, leaf string) []string {

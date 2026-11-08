@@ -69,12 +69,7 @@ type CrashReportAudit struct {
 }
 
 func (a CrashReportAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f CrashReportFinding) bool { return f.Blocking })
 }
 
 func (a CrashReportAudit) HasWarnings() bool {

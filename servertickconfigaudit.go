@@ -59,12 +59,7 @@ func (a TickConfigAudit) Blocking() bool {
 }
 
 func (a TickConfigAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != tkReasonOK {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f TickConfigFinding) bool { return !f.Blocking && f.Reason != tkReasonOK })
 }
 
 func (a TickConfigAudit) Describe() string {

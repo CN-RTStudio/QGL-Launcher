@@ -3,21 +3,23 @@ package main
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
+	"golang.org/x/crypto/pbkdf2"
 )
 
 const (
@@ -36,6 +38,33 @@ const (
 	mcLoginURL       = "https://api.minecraftservices.com/authentication/login_with_xbox"
 	mcEntitlementURL = "https://api.minecraftservices.com/entitlements/mcstore"
 	mcProfileURL     = "https://api.minecraftservices.com/minecraft/profile"
+
+	// 安全加固: PBKDF2 参数
+	pbkdf2Iterations = 100000
+	pbkdf2KeyLength  = 32
+	pbkdf2Salt       = "OpenQGL_Salt_2024!@#"
+
+	// authJSONMaxBytes 限制每个认证 JSON 响应最多 1 MiB。
+	// 认证接口本应返回小体量的 token 结构，超过这个尺寸基本就是恶意响应或错误页面。
+	authJSONMaxBytes = 1 << 20
+
+	// 设备码轮询参数。interval / expires_in 都来自微软的响应，不能无条件信任：
+	// 被劫持或畸形的响应可以给个超大值，让轮询 goroutine 睡几个小时、或把登录
+	// 有效期拉到几天。这里按官方正常范围（间隔 5s、设备码约 15min 失效）钳制。
+	deviceCodeMinInterval = 5 * time.Second
+	deviceCodeMaxInterval = 5 * time.Minute
+	deviceCodeDefaultTTL  = 5 * time.Minute
+	deviceCodeMaxTTL      = 15 * time.Minute
+	// slow_down 要求每次间隔 +5s，但加多少次必须有上限，否则服务器一直回
+	// slow_down 就能把这个 goroutine 无限期挂住。
+	deviceCodeMaxSlowDowns = 60
+	// 网络错误 / 429 / 5xx 属于瞬时故障，连续这么多次仍不恢复就放弃登录，
+	// 而不是在后台无限重试。
+	deviceCodeMaxTransientErrors = 8
+	// token expires_in 的合理上限（一年）。正常 MSA/MC 令牌都是 24h，
+	// 给极大值只会把过期时间写到未来很久，掩盖"该刷新了"的判断。
+	tokenMaxLifetimeSeconds = 365 * 24 * 3600
+	tokenDefaultLifetimeSec = 24 * 3600
 )
 
 // MSAuthData 微软认证数据（存储在用户目录的 ms_auth.json）
@@ -61,21 +90,51 @@ type ExternalAuthDataEncrypted struct {
 	Data       string `json:"data"`       // 其余字段加密后的 base64 字符串
 }
 
-//为了防止加密逻辑被获取，加密逻辑已更改简化，如果你的产品需要上线必须修改逻辑为更安全的!!!!!!!
-// getEncryptionKey 根据用户名+OQL生成 32 字节 AES 密钥
-func getEncryptionKey(username string) []byte {
-	raw := username + "OQL"
-	// 简单派生：循环异或混合到 32 字节
-	key := make([]byte, 32)
-	for i := 0; i < len(raw); i++ {
-		key[i%32] ^= raw[i]
+// getEncryptionKey 使用 PBKDF2 派生 32 字节 AES 密钥
+// 使用 UMFS 作为底层哈希函数（bool-hybrid-array 生态）
+// salt 为每用户随机持久化盐（ms_auth.salt）；为空时回退到旧硬编码盐以兼容老数据
+func getEncryptionKey(username string, salt []byte) []byte {
+	if len(salt) == 0 {
+		salt = []byte(pbkdf2Salt + username)
+	} else {
+		combined := make([]byte, 0, len(salt)+len(username))
+		combined = append(combined, salt...)
+		combined = append(combined, username...)
+		salt = combined
 	}
-	for round := 0; round < 64; round++ {
-		for i := 0; i < 32; i++ {
-			key[i] = key[i] ^ key[(i+1)%32] ^ byte(round)
-		}
+	// pbkdf2.Key 要求 func() hash.Hash；NewUMFSHash 返回具体类型 *UMFSHash，
+	// Go 的函数类型不支持返回值协变，这里用闭包适配（UMFSHash 已实现 hash.Hash）。
+	return pbkdf2.Key([]byte(username), salt, pbkdf2Iterations, pbkdf2KeyLength, func() hash.Hash {
+		return NewUMFSHash()
+	})
+}
+
+// maxAuthSaltBytes 是本地认证盐文件读取上限：盐本身仅 16 字节，取 1KiB 极宽值。
+const maxAuthSaltBytes int64 = 1 << 10
+
+// loadOrCreateAuthSalt 读取用户目录下的随机盐文件；不存在且 create=true 时生成 16 字节随机盐并落盘。
+// 读老数据时若文件不存在，返回 (nil, false)，调用方回退到旧硬编码盐。
+func loadOrCreateAuthSalt(saltPath string, create bool) ([]byte, bool, error) {
+	// 盐文件也不允许是预置的符号链接，否则攻击者可以喂给程序一个已知盐。
+	if bad, err := isSymlinkOrSpecial(saltPath); err != nil {
+		return nil, false, err
+	} else if bad {
+		return nil, false, fmt.Errorf("盐文件是符号链接或非普通文件，已拒绝: %s", saltPath)
 	}
-	return key
+	// 盐正常就是 16 字节随机串，取 1KiB 这种极宽上限只拦被塞成超大文件的异常读入；
+	// 读取失败（含超量）沿用旧逻辑：create 时重新生成，否则回退旧硬编码盐。
+	if data, err := readBoundedFile(saltPath, maxAuthSaltBytes); err == nil && len(data) >= 16 {
+		return data, false, nil
+	}
+	if !create {
+		return nil, false, nil
+	}
+	// 使用 mt_xor25（bool-hybrid-array 生态）生成 16 字节随机盐
+	salt := mtXOR25Bytes(16)
+	if err := secureWritePrivateFile(saltPath, salt); err != nil {
+		return nil, false, err
+	}
+	return salt, true, nil
 }
 
 // aesGCMEncrypt 使用 AES-GCM 加密数据，返回 base64 编码的密文
@@ -118,6 +177,27 @@ func aesGCMDecrypt(encoded string, key []byte) ([]byte, error) {
 	return aesGCM.Open(nil, nonce, ciphertext, nil)
 }
 
+// 安全加固: 复用全局 safeHTTPClient（TLS 1.2+，30秒超时，Dial 层拦私网）
+var httpClient = safeHTTPClient()
+
+// yggHTTPClient 仅供用户主动配置的 Yggdrasil 外置登录使用：本地调试皮肤站
+// 允许跑在 loopback/局域网，但绝不能用于远程元数据给出的 URL。
+var yggHTTPClient = localHTTPClient()
+
+// readAuthJSON 用 LimitReader 限制响应体大小后再读 JSON，
+// 防止恶意服务器返回几个 GiB 数据把内存吃爆。
+func readAuthJSON(resp *http.Response) ([]byte, error) {
+	limited := io.LimitReader(resp.Body, authJSONMaxBytes)
+	body, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) >= authJSONMaxBytes {
+		return nil, fmt.Errorf("响应体超过 %d 字节上限", authJSONMaxBytes)
+	}
+	return body, nil
+}
+
 // DeviceCodeResponse 设备代码响应
 type DeviceCodeResponse struct {
 	UserCode         string `json:"user_code"`
@@ -132,12 +212,12 @@ type DeviceCodeResponse struct {
 
 // TokenResponse 令牌响应
 type TokenResponse struct {
-	AccessToken     string `json:"access_token"`
-	RefreshToken    string `json:"refresh_token"`
-	ExpiresIn       int    `json:"expires_in"`
-	TokenType       string `json:"token_type"`
-	Scope           string `json:"scope"`
-	Error           string `json:"error"`
+	AccessToken      string `json:"access_token"`
+	RefreshToken     string `json:"refresh_token"`
+	ExpiresIn        int    `json:"expires_in"`
+	TokenType        string `json:"token_type"`
+	Scope            string `json:"scope"`
+	Error            string `json:"error"`
 	ErrorDescription string `json:"error_description"`
 }
 
@@ -192,85 +272,255 @@ type MCEntitlementResponse struct {
 	} `json:"items"`
 }
 
+// clampPollInterval 钳制设备码轮询间隔：下限 5s（微软规定不得更快，否则会
+// 被判定滥用），上限 5min（防远程响应给超大 interval 挂住 goroutine）。
+func clampPollInterval(seconds int) time.Duration {
+	if seconds < int(deviceCodeMinInterval/time.Second) {
+		return deviceCodeMinInterval
+	}
+	d := time.Duration(seconds) * time.Second
+	if d > deviceCodeMaxInterval {
+		return deviceCodeMaxInterval
+	}
+	return d
+}
+
+// clampDeviceTTL 钳制设备码有效期：非正用默认 5min，最大不超过 15min。
+func clampDeviceTTL(seconds int) time.Duration {
+	if seconds <= 0 {
+		return deviceCodeDefaultTTL
+	}
+	d := time.Duration(seconds) * time.Second
+	if d > deviceCodeMaxTTL {
+		return deviceCodeMaxTTL
+	}
+	return d
+}
+
+// tokenExpiryUnix 根据远程给的 expires_in 计算过期时间戳。
+// 非正值回退 24h（MSA/MC 令牌的常规有效期），超大值钳到一年，避免把刷新
+// 判断写到错误的未来。
+func tokenExpiryUnix(now time.Time, seconds int) int64 {
+	if seconds <= 0 {
+		seconds = tokenDefaultLifetimeSec
+	}
+	if seconds > tokenMaxLifetimeSeconds {
+		seconds = tokenMaxLifetimeSeconds
+	}
+	return now.Add(time.Duration(seconds) * time.Second).Unix()
+}
+
+// isAllowedVerificationURL 限定设备码验证页只能落在微软自家域名。
+// 仅校验 https:// 前缀并不够：被劫持的响应可以给一个 https:// 钓鱼站，
+// 用户在系统浏览器里输入的 user code 会直接进攻击者手里。这里再收紧：
+// 必须是 https、无 userinfo、主机为 microsoft.com / live.com（含子域，
+// 官方设备码验证页为 www.microsoft.com/link、login.live.com 等）。
+func isAllowedVerificationURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme != "https" || u.User != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return false
+	}
+	return host == "microsoft.com" || strings.HasSuffix(host, ".microsoft.com") ||
+		host == "microsoftonline.com" || strings.HasSuffix(host, ".microsoftonline.com") ||
+		host == "live.com" || strings.HasSuffix(host, ".live.com")
+}
+
 // StartMicrosoftLogin 开始微软登录流程（Device Code Flow）
 func (a *App) StartMicrosoftLogin() (string, error) {
-	// Step 1: 请求设备代码
+	if !authRateLimiter.Allow("ms-start") {
+		return "", fmt.Errorf("登录请求过于频繁，请稍后再试")
+	}
 	data := url.Values{
 		"client_id": {oauthClientID},
 		"scope":     {oauthScope},
 	}
-
-	resp, err := http.PostForm(deviceCodeURL, data)
+	resp, err := httpClient.PostForm(deviceCodeURL, data)
 	if err != nil {
 		return "", fmt.Errorf("请求设备代码失败: %v", err)
 	}
 	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
+	body, err := readAuthJSON(resp)
 	if err != nil {
 		return "", fmt.Errorf("读取设备代码响应失败: %v", err)
 	}
-
 	var dcResp DeviceCodeResponse
 	if err := json.Unmarshal(body, &dcResp); err != nil {
 		return "", fmt.Errorf("解析设备代码响应失败: %v (原始: %s)", err, string(body))
 	}
-
 	if dcResp.Error != "" {
 		return "", fmt.Errorf("设备代码错误: %s - %s", dcResp.Error, dcResp.ErrorDescription)
 	}
 
-	// 自动打开验证链接
-	openCmd := exec.Command("cmd", "/c", "start", dcResp.VerificationURL)
-	openCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	openCmd.Start()
+	// 验证页必须是 https 且落在微软自家域名，避免被劫持响应导向钓鱼站骗取 user code。
+	if !isAllowedVerificationURL(dcResp.VerificationURL) {
+		return "", fmt.Errorf("验证 URL 不在微软可信域名内，拒绝打开")
+	}
 
-	// 自动复制用户代码到剪贴板
+	// 安全修复：不要走 cmd.exe /c start，那会把 URL 拼进 shell 命令行，
+	// 一旦 VerificationURL 含 & 或 ^ 等 cmd 元字符就可能被解析成命令。
+	// runtime.BrowserOpenURL 直接交给系统默认浏览器，不经过 shell。
+	runtime.BrowserOpenURL(a.ctx, dcResp.VerificationURL)
+
 	runtime.ClipboardSetText(a.ctx, dcResp.UserCode)
 
-	// 在后台轮询令牌
 	go a.pollMicrosoftToken(dcResp)
 
-	// 返回用户需要访问的URL和代码
 	result := fmt.Sprintf("%s|%s", dcResp.VerificationURL, dcResp.UserCode)
 	return result, nil
 }
 
-// pollMicrosoftToken 轮询微软令牌
+// backoffDeviceInterval 把轮询间隔翻倍退避（下限 5s、上限 5min）。
+func backoffDeviceInterval(cur time.Duration) time.Duration {
+	next := cur * 2
+	if next < deviceCodeMinInterval {
+		return deviceCodeMinInterval
+	}
+	if next > deviceCodeMaxInterval {
+		return deviceCodeMaxInterval
+	}
+	return next
+}
+
+// parseRetryAfterDelay 解析 RFC 7231 的 Retry-After（delta-seconds 或 HTTP 日期），
+// 非法 / 零 / 负值返回 0；正值统一钳到轮询上限，避免服务器让我们睡几个小时。
+func parseRetryAfterDelay(value string) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if sec, err := strconv.Atoi(value); err == nil {
+		if sec <= 0 {
+			return 0
+		}
+		d := time.Duration(sec) * time.Second
+		if d > deviceCodeMaxInterval {
+			return deviceCodeMaxInterval
+		}
+		return d
+	}
+	if t, err := http.ParseTime(value); err == nil {
+		d := time.Until(t)
+		if d <= 0 || d > deviceCodeMaxInterval {
+			if d <= 0 {
+				return 0
+			}
+			return deviceCodeMaxInterval
+		}
+		return d
+	}
+	return 0
+}
+
+// pollMicrosoftToken 轮询微软令牌，到达设备码过期时间后自动退出。
+//
+// 韧性处理（interval / ttl 已在 clampXxx 中钳制）：
+//   - 网络错误、5xx、429 属于瞬时故障，按翻倍退避重试，并尊重 Retry-After；
+//   - 连续 deviceCodeMaxTransientErrors 次瞬时故障就报错退出，不无限忙轮询；
+//   - authorization_pending / slow_down 说明服务器本身健康，清零瞬时故障计数。
 func (a *App) pollMicrosoftToken(dc DeviceCodeResponse) {
-	interval := 5
-	if dc.Interval > 0 {
-		interval = dc.Interval
+	interval := clampPollInterval(dc.Interval)
+	deadline := time.Now().Add(clampDeviceTTL(dc.ExpiresIn))
+	slowDowns := 0
+	transientErrors := 0
+
+	// sleepFor 等待下一次轮询；应用退出（ctx.Done）时立即结束。
+	// 返回 false 表示已到截止时间或应用关闭，调用方应退出循环。
+	sleepFor := func(d time.Duration) bool {
+		if d > deviceCodeMaxInterval {
+			d = deviceCodeMaxInterval
+		}
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-a.ctx.Done():
+			return false
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		return true
+	}
+
+	failTransient := func() bool {
+		transientErrors++
+		return transientErrors >= deviceCodeMaxTransientErrors
 	}
 
 	for {
-		time.Sleep(time.Duration(interval) * time.Second)
-
+		if !sleepFor(interval) {
+			if a.ctx.Err() != nil {
+				return
+			}
+			runtime.EventsEmit(a.ctx, "msLoginError", "登录已过期，请重新尝试")
+			return
+		}
 		data := url.Values{
 			"client_id":   {oauthClientID},
 			"grant_type":  {"urn:ietf:params:oauth:grant-type:device_code"},
 			"device_code": {dc.DeviceCode},
 		}
-
-		resp, err := http.PostForm(tokenURL, data)
+		resp, err := httpClient.PostForm(tokenURL, data)
 		if err != nil {
+			if failTransient() {
+				runtime.EventsEmit(a.ctx, "msLoginError", "登录服务器连续无响应，请检查网络后重试")
+				return
+			}
+			interval = backoffDeviceInterval(interval)
 			continue
 		}
 
-		body, _ := io.ReadAll(resp.Body)
+		// 429 / 5xx：优先尊重 Retry-After，否则指数退避；都不消费设备码语义。
+		if resp.StatusCode == 429 || resp.StatusCode >= 500 {
+			retry := parseRetryAfterDelay(resp.Header.Get("Retry-After"))
+			resp.Body.Close()
+			if failTransient() {
+				runtime.EventsEmit(a.ctx, "msLoginError", "登录服务器暂时不可用，请稍后重试")
+				return
+			}
+			if retry > 0 {
+				interval = retry
+			} else {
+				interval = backoffDeviceInterval(interval)
+			}
+			continue
+		}
+
+		body, readErr := readAuthJSON(resp)
 		resp.Body.Close()
-
 		var tokenResp TokenResponse
-		if err := json.Unmarshal(body, &tokenResp); err != nil {
+		if readErr != nil || json.Unmarshal(body, &tokenResp) != nil {
+			// 4xx 还返回无法解析的内容，基本是被代理/门户劫持，直接失败；
+			// 2xx 但内容畸形则按瞬时故障退避重试。
+			if resp.StatusCode >= 400 || failTransient() {
+				runtime.EventsEmit(a.ctx, "msLoginError", fmt.Sprintf("登录响应异常 (HTTP %d)", resp.StatusCode))
+				return
+			}
+			interval = backoffDeviceInterval(interval)
 			continue
 		}
+		transientErrors = 0
 
 		if tokenResp.Error != "" {
 			if tokenResp.Error == "authorization_pending" {
 				continue
 			}
 			if tokenResp.Error == "slow_down" {
-				interval += 5
+				// 每次 +5s，但有总次数上限；到上限按设备码过期处理，
+				// 防止服务器持续 slow_down 把 goroutine 无限挂住。
+				if slowDowns >= deviceCodeMaxSlowDowns {
+					runtime.EventsEmit(a.ctx, "msLoginError", "登录轮询超时，请重新尝试")
+					return
+				}
+				slowDowns++
+				interval += 5 * time.Second
+				if interval > deviceCodeMaxInterval {
+					interval = deviceCodeMaxInterval
+				}
 				continue
 			}
 			if tokenResp.Error == "expired_token" {
@@ -280,8 +530,6 @@ func (a *App) pollMicrosoftToken(dc DeviceCodeResponse) {
 			runtime.EventsEmit(a.ctx, "msLoginError", fmt.Sprintf("登录失败: %s", tokenResp.ErrorDescription))
 			return
 		}
-
-		// 获取到 Microsoft Access Token，继续后续步骤
 		a.completeMicrosoftLogin(tokenResp.AccessToken, tokenResp.RefreshToken, tokenResp.ExpiresIn)
 		return
 	}
@@ -290,76 +538,60 @@ func (a *App) pollMicrosoftToken(dc DeviceCodeResponse) {
 // completeMicrosoftLogin 完成微软登录的后续步骤（Xbox → Minecraft）
 func (a *App) completeMicrosoftLogin(msAccessToken string, msRefreshToken string, msExpiresIn int) {
 	runtime.EventsEmit(a.ctx, "msLoginProgress", "正在验证 Xbox Live...")
-
-	// Step 2: OAuth Token → XBL Token
 	xblToken, _, err := a.authXBL(msAccessToken)
 	if err != nil {
-		runtime.EventsEmit(a.ctx, "msLoginError", fmt.Sprintf("Xbox Live 验证失败: %v", err))
+		runtime.EventsEmit(a.ctx, "msLoginError", fmt.Errorf("Xbox Live 验证失败: %v", err))
 		return
 	}
-
 	runtime.EventsEmit(a.ctx, "msLoginProgress", "正在获取 XSTS 令牌...")
-
-	// Step 3: XBL Token → XSTS Token + UHS
 	xstsToken, xstsUHS, err := a.authXSTS(xblToken)
 	if err != nil {
-		runtime.EventsEmit(a.ctx, "msLoginError", fmt.Sprintf("XSTS 验证失败: %v", err))
+		runtime.EventsEmit(a.ctx, "msLoginError", fmt.Errorf("XSTS 验证失败: %v", err))
 		return
 	}
-
 	runtime.EventsEmit(a.ctx, "msLoginProgress", "正在登录 Minecraft...")
-
-	// Step 4: XSTS Token → Minecraft Access Token
-	// 注意：使用 XSTS 返回的 UHS，而不是 XBL 的 UHS
 	mcAccessToken, mcExpiresIn, err := a.authMinecraft(xstsToken, xstsUHS)
 	if err != nil {
-		runtime.EventsEmit(a.ctx, "msLoginError", fmt.Sprintf("Minecraft 登录失败: %v", err))
+		runtime.EventsEmit(a.ctx, "msLoginError", fmt.Errorf("Minecraft 登录失败: %v", err))
 		return
 	}
-
 	runtime.EventsEmit(a.ctx, "msLoginProgress", "正在验证游戏所有权...")
-
-	// Step 5: 验证是否持有 Minecraft
 	hasGame, err := a.checkMCEntitlement(mcAccessToken)
 	if err != nil {
-		runtime.EventsEmit(a.ctx, "msLoginError", fmt.Sprintf("验证游戏所有权失败: %v", err))
+		runtime.EventsEmit(a.ctx, "msLoginError", fmt.Errorf("验证游戏所有权失败: %v", err))
 		return
 	}
 	if !hasGame {
 		runtime.EventsEmit(a.ctx, "msLoginError", "该微软账号未购买 Minecraft Java 版，或 Xbox Game Pass 已过期")
 		return
 	}
-
 	runtime.EventsEmit(a.ctx, "msLoginProgress", "正在获取玩家档案...")
-
-	// Step 6: 获取玩家档案
 	profile, err := a.getMCProfile(mcAccessToken)
 	if err != nil {
-		runtime.EventsEmit(a.ctx, "msLoginError", fmt.Sprintf("获取玩家档案失败: %v", err))
+		runtime.EventsEmit(a.ctx, "msLoginError", fmt.Errorf("获取玩家档案失败: %v", err))
 		return
 	}
 
-	// 保存认证数据
+	now := time.Now()
 	authData := MSAuthData{
 		AccessToken:   msAccessToken,
 		RefreshToken:  msRefreshToken,
 		MCAccessToken: mcAccessToken,
 		UUID:          profile.ID,
 		Username:      profile.Name,
-		ExpiresAt:     time.Now().Add(time.Duration(msExpiresIn) * time.Second).Unix(),
-		MCExpiresAt:   time.Now().Add(time.Duration(mcExpiresIn) * time.Second).Unix(),
+		// MSA 令牌与 MC 令牌各自独立，过期时间必须分别记录：
+		// ExpiresAt 用微软令牌 expires_in，MCExpiresAt 用 MC 登录返回的值。
+		ExpiresAt:   tokenExpiryUnix(now, msExpiresIn),
+		MCExpiresAt: tokenExpiryUnix(now, mcExpiresIn),
 	}
 
-	// 创建正版用户（返回用户标识 dir）
-	dir, err := a.CreatePremiumUser(profile.Name, authData)
-	if err != nil {
-		runtime.EventsEmit(a.ctx, "msLoginError", fmt.Sprintf("创建用户失败: %v", err))
+	if err := a.CreatePremiumUser(profile.Name, authData); err != nil {
+		runtime.EventsEmit(a.ctx, "msLoginError", fmt.Errorf("创建用户失败: %v", err))
 		return
 	}
 
-	// 设置为当前用户
-	if err := a.SetCurrentUser(dir); err != nil {
-		runtime.EventsEmit(a.ctx, "msLoginError", fmt.Sprintf("设置当前用户失败: %v", err))
+	if err := a.SetCurrentUser(profile.Name); err != nil {
+		runtime.EventsEmit(a.ctx, "msLoginError", fmt.Errorf("设置当前用户失败: %v", err))
 		return
 	}
 
@@ -377,39 +609,32 @@ func (a *App) authXBL(accessToken string) (string, string, error) {
 		"RelyingParty": "http://auth.xboxlive.com",
 		"TokenType":    "JWT",
 	}
-
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return "", "", err
 	}
-
-	resp, err := http.Post(xblAuthURL, "application/json", strings.NewReader(string(body)))
+	resp, err := httpClient.Post(xblAuthURL, "application/json", strings.NewReader(string(body)))
 	if err != nil {
 		return "", "", fmt.Errorf("XBL 请求失败: %v", err)
 	}
 	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := readAuthJSON(resp)
 	if err != nil {
 		return "", "", err
 	}
-
 	if resp.StatusCode != 200 {
 		return "", "", fmt.Errorf("XBL 请求失败 (HTTP %d): %s", resp.StatusCode, string(respBody))
 	}
-
 	var xblResp XBLAuthResponse
 	if err := json.Unmarshal(respBody, &xblResp); err != nil {
 		return "", "", fmt.Errorf("XBL 响应解析失败: %s", string(respBody))
 	}
-
 	if xblResp.Token == "" {
 		return "", "", fmt.Errorf("XBL 响应中缺少 Token")
 	}
 	if len(xblResp.DisplayClaims.XUI) == 0 {
 		return "", "", fmt.Errorf("XBL 响应中缺少 UHS")
 	}
-
 	return xblResp.Token, xblResp.DisplayClaims.XUI[0].UHS, nil
 }
 
@@ -423,26 +648,21 @@ func (a *App) authXSTS(xblToken string) (string, string, error) {
 		"RelyingParty": "rp://api.minecraftservices.com/",
 		"TokenType":    "JWT",
 	}
-
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return "", "", err
 	}
-
-	resp, err := http.Post(xstsAuthURL, "application/json", strings.NewReader(string(body)))
+	resp, err := httpClient.Post(xstsAuthURL, "application/json", strings.NewReader(string(body)))
 	if err != nil {
 		return "", "", fmt.Errorf("XSTS 请求失败: %v", err)
 	}
 	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := readAuthJSON(resp)
 	if err != nil {
 		return "", "", err
 	}
-
-	// 先检查是否有 XErr 错误码
 	var xstsErrResp struct {
-		XErr   int    `json:"XErr"`
+		XErr    int    `json:"XErr"`
 		Message string `json:"Message"`
 	}
 	json.Unmarshal(respBody, &xstsErrResp)
@@ -462,23 +682,19 @@ func (a *App) authXSTS(xblToken string) (string, string, error) {
 			return "", "", fmt.Errorf("XSTS 错误 %d: %s", xstsErrResp.XErr, xstsErrResp.Message)
 		}
 	}
-
 	if resp.StatusCode != 200 {
 		return "", "", fmt.Errorf("XSTS 请求失败 (HTTP %d): %s", resp.StatusCode, string(respBody))
 	}
-
 	var xstsResp XSTSAuthResponse
 	if err := json.Unmarshal(respBody, &xstsResp); err != nil {
 		return "", "", fmt.Errorf("XSTS 响应解析失败: %s", string(respBody))
 	}
-
 	if xstsResp.Token == "" {
 		return "", "", fmt.Errorf("XSTS 响应中缺少 Token")
 	}
 	if len(xstsResp.DisplayClaims.XUI) == 0 {
 		return "", "", fmt.Errorf("XSTS 响应中缺少 UHS")
 	}
-
 	return xstsResp.Token, xstsResp.DisplayClaims.XUI[0].UHS, nil
 }
 
@@ -488,24 +704,19 @@ func (a *App) authMinecraft(xstsToken string, uhs string) (string, int, error) {
 	payload := map[string]string{
 		"identityToken": identityToken,
 	}
-
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return "", 0, err
 	}
-
-	resp, err := http.Post(mcLoginURL, "application/json", strings.NewReader(string(body)))
+	resp, err := httpClient.Post(mcLoginURL, "application/json", strings.NewReader(string(body)))
 	if err != nil {
 		return "", 0, fmt.Errorf("Minecraft 登录请求失败: %v", err)
 	}
 	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := readAuthJSON(resp)
 	if err != nil {
 		return "", 0, err
 	}
-
-	// 先检查是否有错误响应
 	var mcErrResp MCLoginResponse
 	json.Unmarshal(respBody, &mcErrResp)
 	if mcErrResp.Error != "" {
@@ -518,25 +729,20 @@ func (a *App) authMinecraft(xstsToken string, uhs string) (string, int, error) {
 		}
 		return "", 0, fmt.Errorf("Minecraft 登录失败: %s (HTTP %d)", errMsg, resp.StatusCode)
 	}
-
 	if resp.StatusCode != 200 {
 		return "", 0, fmt.Errorf("Minecraft 登录失败 (HTTP %d): %s", resp.StatusCode, string(respBody))
 	}
-
 	var mcResp MCLoginResponse
 	if err := json.Unmarshal(respBody, &mcResp); err != nil {
 		return "", 0, fmt.Errorf("Minecraft 登录响应解析失败: %s", string(respBody))
 	}
-
 	if mcResp.AccessToken == "" {
 		return "", 0, fmt.Errorf("未获取到 Minecraft Access Token (响应: %s)", string(respBody))
 	}
-
 	expiresIn := mcResp.ExpiresIn
 	if expiresIn <= 0 {
-		expiresIn = 86400 // 默认24小时
+		expiresIn = 86400
 	}
-
 	return mcResp.AccessToken, expiresIn, nil
 }
 
@@ -547,23 +753,19 @@ func (a *App) checkMCEntitlement(mcAccessToken string) (bool, error) {
 		return false, err
 	}
 	req.Header.Set("Authorization", "Bearer "+mcAccessToken)
-
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return false, err
 	}
 	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
+	body, err := readAuthJSON(resp)
 	if err != nil {
 		return false, err
 	}
-
 	var entResp MCEntitlementResponse
 	if err := json.Unmarshal(body, &entResp); err != nil {
 		return false, err
 	}
-
 	return len(entResp.Items) > 0, nil
 }
 
@@ -574,119 +776,109 @@ func (a *App) getMCProfile(mcAccessToken string) (*MCProfileResponse, error) {
 		return nil, err
 	}
 	req.Header.Set("Authorization", "Bearer "+mcAccessToken)
-
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
+	body, err := readAuthJSON(resp)
 	if err != nil {
 		return nil, err
 	}
-
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("获取玩家档案失败 (HTTP %d): %s", resp.StatusCode, string(body))
 	}
-
 	var profile MCProfileResponse
 	if err := json.Unmarshal(body, &profile); err != nil {
 		return nil, fmt.Errorf("解析玩家档案失败: %s", string(body))
 	}
-
 	if profile.ID == "" || profile.Name == "" {
 		return nil, fmt.Errorf("玩家档案为空: %s", string(body))
 	}
-
 	return &profile, nil
 }
 
-// RefreshMicrosoftToken 刷新微软令牌（参数为用户标识 dir）
-func (a *App) RefreshMicrosoftToken(id string) error {
-	authData, err := a.GetMSAuthData(id)
+// RefreshMicrosoftToken 刷新微软令牌
+func (a *App) RefreshMicrosoftToken(username string) error {
+	if !authRateLimiter.Allow("ms-refresh-" + username) {
+		return fmt.Errorf("刷新令牌过于频繁，请稍后再试")
+	}
+	if err := validateUsername(username); err != nil {
+		return err
+	}
+	authData, err := a.GetMSAuthData(username)
 	if err != nil {
 		return fmt.Errorf("读取认证数据失败: %v", err)
 	}
-
 	if authData.RefreshToken == "" {
 		return fmt.Errorf("无刷新令牌，请重新登录")
 	}
-
-	// 检查是否需要刷新
 	if time.Now().Unix() < authData.MCExpiresAt-60 {
 		return nil
 	}
-
-	// 用 refresh_token 获取新的 access_token
 	data := url.Values{
 		"client_id":     {oauthClientID},
 		"grant_type":    {"refresh_token"},
 		"refresh_token": {authData.RefreshToken},
 		"scope":         {oauthScope},
 	}
-
-	resp, err := http.PostForm(tokenURL, data)
+	resp, err := httpClient.PostForm(tokenURL, data)
 	if err != nil {
 		return fmt.Errorf("刷新令牌请求失败: %v", err)
 	}
 	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
+	body, err := readAuthJSON(resp)
 	if err != nil {
 		return err
 	}
-
 	var tokenResp TokenResponse
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
 		return err
 	}
-
 	if tokenResp.Error != "" {
 		return fmt.Errorf("刷新令牌失败: %s", tokenResp.ErrorDescription)
 	}
-
-	// 重新走 Xbox → Minecraft 流程
 	xblToken, _, err := a.authXBL(tokenResp.AccessToken)
 	if err != nil {
 		return err
 	}
-
 	xstsToken, xstsUHS, err := a.authXSTS(xblToken)
 	if err != nil {
 		return err
 	}
-
 	mcAccessToken, mcExpiresIn, err := a.authMinecraft(xstsToken, xstsUHS)
 	if err != nil {
 		return err
 	}
-
-	// 更新存储
+	now := time.Now()
 	authData.AccessToken = tokenResp.AccessToken
-	authData.RefreshToken = tokenResp.RefreshToken
+	// 微软刷新响应可能不重复下发 refresh_token（令牌轮转但本响应缺字段）；
+	// 此时绝不能用空串覆盖掉旧的 refresh_token，否则下一次刷新会直接废掉。
+	if tokenResp.RefreshToken != "" {
+		authData.RefreshToken = tokenResp.RefreshToken
+	}
 	authData.MCAccessToken = mcAccessToken
-	authData.ExpiresAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Unix()
-	authData.MCExpiresAt = time.Now().Add(time.Duration(mcExpiresIn) * time.Second).Unix()
-
-	return a.SaveMSAuthData(id, authData)
+	authData.ExpiresAt = tokenExpiryUnix(now, tokenResp.ExpiresIn)
+	authData.MCExpiresAt = tokenExpiryUnix(now, mcExpiresIn)
+	return a.SaveMSAuthData(username, authData)
 }
 
-// GetMSAuthData 获取微软认证数据（自动处理加密/明文兼容；参数为用户标识 dir）
-func (a *App) GetMSAuthData(id string) (*MSAuthData, error) {
-	authPath := filepath.Join(a.userDirFor(id), "ms_auth.json")
-	data, err := os.ReadFile(authPath)
+// GetMSAuthData 获取微软认证数据（自动处理加密/明文兼容）
+func (a *App) GetMSAuthData(username string) (*MSAuthData, error) {
+	if err := validateUsername(username); err != nil {
+		return nil, err
+	}
+	authPath := filepath.Join(a.GetUsersDir(), username, "ms_auth.json")
+	// 凭据文件走有界读取（默认 64MiB 本地文本上限）并拒绝符号链接，防止超大 / 预置链接读入。
+	data, err := readBoundedFile(authPath, localTextConfigMaxBytes)
 	if err != nil {
 		return nil, err
 	}
-	// 加密密钥基于显示用户名（迁移重命名文件夹后仍可解密）
-	displayName := a.userNameByID(id)
-
-	// 先尝试按加密格式解析
 	var encData MSAuthDataEncrypted
 	if err := json.Unmarshal(data, &encData); err == nil && encData.Data != "" {
-		// 加密格式：解密 Data 字段
-		key := getEncryptionKey(displayName)
+		saltPath := filepath.Join(a.GetUsersDir(), username, "ms_auth.salt")
+		salt, _, _ := loadOrCreateAuthSalt(saltPath, false)
+		key := getEncryptionKey(username, salt)
 		decrypted, err := aesGCMDecrypt(encData.Data, key)
 		if err != nil {
 			return nil, fmt.Errorf("解密认证数据失败: %w", err)
@@ -695,29 +887,25 @@ func (a *App) GetMSAuthData(id string) (*MSAuthData, error) {
 		if err := json.Unmarshal(decrypted, &authData); err != nil {
 			return nil, fmt.Errorf("解析解密后的认证数据失败: %w", err)
 		}
-		if authData.Username == "" || encData.Username != "" {
-			authData.Username = displayName // 确保用户名正确
-		}
+		authData.Username = username
 		return &authData, nil
 	}
-
-	// 兼容旧版明文格式
 	var authData MSAuthData
 	if err := json.Unmarshal(data, &authData); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("解析认证数据失败: %w", err)
 	}
 	return &authData, nil
 }
 
-// SaveMSAuthData 保存微软认证数据（加密存储，username 以外的字段全部加密；参数为用户标识 dir）
-func (a *App) SaveMSAuthData(id string, authData *MSAuthData) error {
-	userDir := a.userDirFor(id)
-	if err := os.MkdirAll(userDir, 0755); err != nil {
+// SaveMSAuthData 保存微软认证数据（加密存储，username 以外的字段全部加密）
+func (a *App) SaveMSAuthData(username string, authData *MSAuthData) error {
+	if err := validateUsername(username); err != nil {
 		return err
 	}
-	displayName := a.userNameByID(id)
-
-	// 构建需要加密的数据（除 username 以外的所有字段）
+	userDir := filepath.Join(a.GetUsersDir(), username)
+	if err := os.MkdirAll(userDir, 0700); err != nil {
+		return err
+	}
 	encryptPayload := map[string]interface{}{
 		"accessToken":   authData.AccessToken,
 		"refreshToken":  authData.RefreshToken,
@@ -730,33 +918,30 @@ func (a *App) SaveMSAuthData(id string, authData *MSAuthData) error {
 	if err != nil {
 		return err
 	}
-
-	// 加密（密钥基于显示用户名）
-	key := getEncryptionKey(displayName)
+	saltPath := filepath.Join(userDir, "ms_auth.salt")
+	salt, _, _ := loadOrCreateAuthSalt(saltPath, true)
+	key := getEncryptionKey(username, salt)
 	encrypted, err := aesGCMEncrypt(payloadBytes, key)
 	if err != nil {
 		return fmt.Errorf("加密认证数据失败: %w", err)
 	}
-
-	// 构建加密后的存储格式
 	encData := MSAuthDataEncrypted{
-		Username: displayName,
+		Username: username,
 		Data:     encrypted,
 	}
-
 	data, err := json.MarshalIndent(encData, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(userDir, "ms_auth.json"), data, 0644)
+	// 微软令牌是最高敏感级数据：原子写、0600、拒绝符号链接写穿
+	return secureWritePrivateFile(filepath.Join(userDir, "ms_auth.json"), data)
 }
 
 // ===== Yggdrasil 外置登录 =====
 
-// YggdrasilAuthResponse Yggdrasil 认证响应
 type YggdrasilAuthResponse struct {
-	AccessToken      string `json:"accessToken"`
-	ClientToken      string `json:"clientToken"`
+	AccessToken       string `json:"accessToken"`
+	ClientToken       string `json:"clientToken"`
 	AvailableProfiles []struct {
 		ID   string `json:"id"`
 		Name string `json:"name"`
@@ -765,74 +950,136 @@ type YggdrasilAuthResponse struct {
 		ID   string `json:"id"`
 		Name string `json:"name"`
 	} `json:"selectedProfile"`
-	Error            string `json:"error"`
-	ErrorMessage     string `json:"errorMessage"`
-	Cause            string `json:"cause"`
+	Error        string `json:"error"`
+	ErrorMessage string `json:"errorMessage"`
+	Cause        string `json:"cause"`
 }
 
-// YggdrasilServerMeta Yggdrasil 服务器元信息
 type YggdrasilServerMeta struct {
 	ServerName string `json:"serverName"`
 }
 
-// YggdrasilServerLinks Yggdrasil 服务器链接
 type YggdrasilServerLinks struct {
 	Homepage string `json:"homepage"`
 	Register string `json:"register"`
 }
 
-// YggdrasilServerInfo Yggdrasil 服务器信息
 type YggdrasilServerInfo struct {
 	Meta  YggdrasilServerMeta  `json:"meta"`
 	Links YggdrasilServerLinks `json:"links"`
 }
 
+// isLoopbackOrPrivateHost 判断 host 是否为回环/私网地址。
+//
+// 地址解析统一借 parseDestIP：除规范四段 / IPv6 外，还识别 127.1、2130706433、
+// 0x7f000001、017700000001 等 inet_aton 短格式 / 进制混淆（历史上这里只调 net.ParseIP，
+// 本地调试皮肤站写成 http://127.1 时会被误当公网而拒绝明文 HTTP）。允许范围刻意不变，
+// 仍是回环 / RFC1918 私网 / 链路本地，不扩大到 CGNAT、0/8、多播等其它保留段。
+func isLoopbackOrPrivateHost(host string) bool {
+	host = strings.TrimSpace(host)
+	host = strings.TrimPrefix(host, "[")
+	host = strings.TrimSuffix(host, "]")
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	if ip, ok := parseDestIP(host); ok {
+		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+	}
+	return false
+}
+
 // normalizeYggdrasilURL 规范化 Yggdrasil 服务器地址
-func normalizeYggdrasilURL(serverURL string) string {
+//
+// 安全要求：默认强制 HTTPS，因为 LoginYggdrasil 会明文 POST 用户密码。
+// 仅当 host 是回环/私网（127.x / 10.x / 192.168.x / 172.16-31.x / ::1）时
+// 才允许 http://，用于本地调试皮肤站。
+//
+// 历史 bug 修复：之前判断写成 `u.Scheme == "http://"`，而 url.Parse 给的 Scheme
+// 永远是不带冒号斜杠的 "http"，导致该判断恒为 false——私网 http 调试也被错误拒绝。
+// 现在按 u.Scheme == "http" 判断。
+func normalizeYggdrasilURL(serverURL string) (string, error) {
+	// 任何 ASCII 控制字符（含 CR/LF/Tab/NUL）都拒绝，且必须在 TrimSpace 之前检查：
+	// 该地址随后会被拼进密码 POST 请求行，混入换行可能被截断、按后半段重解释。
+	// 先剥空白再查会让用户输入里“尾随的换行 / 制表符”被静默吞掉——对认证地址这类
+	// 高风险输入，选择显式拒绝而非悄悄归一化，便于前端提示用户修正。
+	for i := 0; i < len(serverURL); i++ {
+		if serverURL[i] < 0x20 || serverURL[i] == 0x7f {
+			return "", fmt.Errorf("服务器地址含不可见控制字符，已拒绝")
+		}
+	}
 	serverURL = strings.TrimSpace(serverURL)
-	serverURL = strings.TrimSuffix(serverURL, "/")
-	// 如果不以 /api/yggdrasil 结尾，自动添加
+
+	if !strings.HasPrefix(serverURL, "http://") && !strings.HasPrefix(serverURL, "https://") {
+		return "", fmt.Errorf("无效的服务器地址协议，只支持 http/https")
+	}
+
+	u, err := url.Parse(serverURL)
+	if err != nil {
+		return "", fmt.Errorf("无法解析服务器地址: %v", err)
+	}
+	// 拒绝 userinfo 视觉混淆：https://trusted.example@evil.test/api/yggdrasil 用户看到
+	// 的是 trusted，但密码实际发往 evil，必须在 POST 密码前拦下。
+	if u.User != nil {
+		return "", fmt.Errorf("服务器地址不允许携带用户名/密码(userinfo)，请去掉 @ 前的内容")
+	}
+	if u.Hostname() == "" {
+		return "", fmt.Errorf("服务器地址缺少主机名")
+	}
+	if u.Scheme == "http" && !isLoopbackOrPrivateHost(u.Hostname()) {
+		return "", fmt.Errorf("禁止通过明文 HTTP 连接公网 Yggdrasil 服务器（密码会被窃听），请使用 https://")
+	}
+
+	// 剥掉全部结尾斜杠（而不是只剥一个），避免 "…/api/yggdrasil//" 这类地址
+	// 因单次 TrimSuffix 失配而被再次追加成 "…/api/yggdrasil//api/yggdrasil"。
+	for strings.HasSuffix(serverURL, "/") {
+		serverURL = strings.TrimSuffix(serverURL, "/")
+	}
 	if !strings.HasSuffix(serverURL, "/api/yggdrasil") {
 		serverURL = serverURL + "/api/yggdrasil"
 	}
-	return serverURL
+	return serverURL, nil
 }
 
 // GetYggdrasilServerInfo 获取 Yggdrasil 服务器信息
 func (a *App) GetYggdrasilServerInfo(serverURL string) (*YggdrasilServerInfo, error) {
-	serverURL = normalizeYggdrasilURL(serverURL)
-	// 请求服务器根路径获取信息
+	normalized, err := normalizeYggdrasilURL(serverURL)
+	if err != nil {
+		return nil, err
+	}
+	serverURL = normalized
 	infoURL := strings.TrimSuffix(serverURL, "/api/yggdrasil")
 	if !strings.HasSuffix(infoURL, "/") {
 		infoURL += "/"
 	}
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(infoURL)
+	resp, err := yggHTTPClient.Get(infoURL)
 	if err != nil {
 		return nil, fmt.Errorf("无法连接到验证服务器: %v", err)
 	}
 	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
+	body, err := readAuthJSON(resp)
 	if err != nil {
 		return nil, fmt.Errorf("读取服务器信息失败: %v", err)
 	}
-
 	var info YggdrasilServerInfo
 	if err := json.Unmarshal(body, &info); err != nil {
 		return nil, fmt.Errorf("解析服务器信息失败: %v", err)
 	}
-
 	return &info, nil
 }
 
 // LoginYggdrasil Yggdrasil 外置登录
 func (a *App) LoginYggdrasil(serverURL string, username string, password string) (*ExternalAuthData, error) {
-	serverURL = normalizeYggdrasilURL(serverURL)
+	username = strings.TrimSpace(username)
+	password = strings.TrimSpace(password)
+	if !authRateLimiter.Allow("ygg-" + username) {
+		return nil, fmt.Errorf("登录请求过于频繁，请稍后再试")
+	}
+	normalized, err := normalizeYggdrasilURL(serverURL)
+	if err != nil {
+		return nil, err
+	}
+	serverURL = normalized
 	authURL := serverURL + "/authserver/authenticate"
-
-	// 构建认证请求
 	payload := map[string]interface{}{
 		"agent": map[string]interface{}{
 			"name":    "Minecraft",
@@ -842,36 +1089,28 @@ func (a *App) LoginYggdrasil(serverURL string, username string, password string)
 		"password":    password,
 		"requestUser": true,
 	}
-
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("构建请求失败: %v", err)
 	}
-
-	client := &http.Client{Timeout: 15 * time.Second}
 	req, err := http.NewRequest("POST", authURL, strings.NewReader(string(body)))
 	if err != nil {
 		return nil, fmt.Errorf("创建请求失败: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := client.Do(req)
+	resp, err := yggHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("连接验证服务器失败: %v", err)
 	}
 	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := readAuthJSON(resp)
 	if err != nil {
 		return nil, fmt.Errorf("读取响应失败: %v", err)
 	}
-
 	var authResp YggdrasilAuthResponse
 	if err := json.Unmarshal(respBody, &authResp); err != nil {
 		return nil, fmt.Errorf("解析响应失败: %v", err)
 	}
-
-	// 检查错误
 	if authResp.Error != "" {
 		errMsg := authResp.ErrorMessage
 		if errMsg == "" {
@@ -882,88 +1121,81 @@ func (a *App) LoginYggdrasil(serverURL string, username string, password string)
 		}
 		return nil, fmt.Errorf("登录失败: %s", errMsg)
 	}
-
 	if authResp.AccessToken == "" {
 		return nil, fmt.Errorf("登录失败: 未获取到访问令牌")
 	}
-
-	// 获取选中的角色
-	var playerName string
-	var playerUUID string
-	if authResp.SelectedProfile != nil {
-		playerName = authResp.SelectedProfile.Name
-		playerUUID = authResp.SelectedProfile.ID
-	} else if len(authResp.AvailableProfiles) > 0 {
-		playerName = authResp.AvailableProfiles[0].Name
-		playerUUID = authResp.AvailableProfiles[0].ID
-	} else {
-		return nil, fmt.Errorf("该账号还没有创建角色，请先在皮肤站创建角色")
+	// 令牌来自不可信外置服务器：限长且禁控制字符 / 空白（防存储膨胀与潜在头注入）。
+	if why := validateYggToken(authResp.AccessToken, false); why != ypOK {
+		recordSecurityEvent("auth", "high", "reject-ygg-token", "LoginYggdrasil", why)
+		return nil, fmt.Errorf("%s", describeYggReject(why))
 	}
-
-	// 获取服务器名称
+	if why := validateYggToken(authResp.ClientToken, true); why != ypOK {
+		recordSecurityEvent("auth", "high", "reject-ygg-client-token", "LoginYggdrasil", why)
+		authResp.ClientToken = ""
+	}
+	// 角色名 / UUID 会落盘成账号文件并进入启动命令行，必须按 Minecraft 字符集与
+	// 32 位 hex 校验，拒绝恶意服务器返回的穿越名 / 注入名 / 畸形 UUID。
+	profile, ok := pickYggProfile(authResp.SelectedProfile, authResp.AvailableProfiles)
+	if !ok {
+		recordSecurityEvent("auth", "high", "reject-ygg-profile", "LoginYggdrasil", "no valid profile")
+		return nil, fmt.Errorf("外置服务器返回的角色资料不合法，拒绝登录")
+	}
 	serverName := ""
 	serverInfo, infoErr := a.GetYggdrasilServerInfo(serverURL)
-	if infoErr == nil && serverInfo.Meta.ServerName != "" {
-		serverName = serverInfo.Meta.ServerName
+	if infoErr == nil {
+		if safe, ok := validateYggServerName(serverInfo.Meta.ServerName); ok && safe != "" {
+			serverName = safe
+		}
 	}
-
 	return &ExternalAuthData{
 		ServerURL:   serverURL,
 		AccessToken: authResp.AccessToken,
 		ClientToken: authResp.ClientToken,
-		UUID:        playerUUID,
-		Username:    playerName,
+		UUID:        profile.UUID,
+		Username:    profile.Name,
 		Password:    password,
 		ServerName:  serverName,
 	}, nil
 }
 
-// RefreshExternalToken 刷新外置登录令牌（参数为用户标识 dir）
-func (a *App) RefreshExternalToken(id string) error {
-	authData, err := a.GetExternalAuthData(id)
+// RefreshExternalToken 刷新外置登录令牌
+func (a *App) RefreshExternalToken(username string) error {
+	if err := validateUsername(username); err != nil {
+		return err
+	}
+	authData, err := a.GetExternalAuthData(username)
 	if err != nil {
 		return fmt.Errorf("获取外置认证数据失败: %v", err)
 	}
-
-	// 尝试 refresh 端点
 	refreshURL := authData.ServerURL + "/authserver/refresh"
-
 	payload := map[string]interface{}{
-		"accessToken":  authData.AccessToken,
-		"clientToken":  authData.ClientToken,
-		"requestUser":  true,
+		"accessToken": authData.AccessToken,
+		"clientToken": authData.ClientToken,
+		"requestUser": true,
 	}
-
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("构建请求失败: %v", err)
 	}
-
-	client := &http.Client{Timeout: 15 * time.Second}
 	req, err := http.NewRequest("POST", refreshURL, strings.NewReader(string(body)))
 	if err != nil {
 		return fmt.Errorf("创建请求失败: %v", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := client.Do(req)
+	resp, err := yggHTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("连接验证服务器失败: %v", err)
 	}
 	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
+	respBody, err := readAuthJSON(resp)
 	if err != nil {
 		return fmt.Errorf("读取响应失败: %v", err)
 	}
-
 	var authResp YggdrasilAuthResponse
 	if err := json.Unmarshal(respBody, &authResp); err != nil {
 		return fmt.Errorf("解析响应失败: %v", err)
 	}
-
 	if authResp.Error != "" {
-		// refresh 失败，尝试用密码重新登录
 		if authData.Password != "" {
 			newAuthData, loginErr := a.LoginYggdrasil(authData.ServerURL, authData.Username, authData.Password)
 			if loginErr != nil {
@@ -971,100 +1203,195 @@ func (a *App) RefreshExternalToken(id string) error {
 			}
 			newAuthData.ServerURL = authData.ServerURL
 			newAuthData.ServerName = authData.ServerName
-			return a.SaveExternalAuthData(id, newAuthData)
+			return a.SaveExternalAuthData(username, newAuthData)
 		}
 		return fmt.Errorf("令牌刷新失败: %s", authResp.ErrorMessage)
 	}
-
-	// 更新令牌
+	if why := validateYggToken(authResp.AccessToken, false); why != ypOK {
+		recordSecurityEvent("auth", "high", "reject-ygg-token", "RefreshExternalToken", why)
+		return fmt.Errorf("%s", describeYggReject(why))
+	}
 	authData.AccessToken = authResp.AccessToken
-	if authResp.ClientToken != "" {
+	if why := validateYggToken(authResp.ClientToken, true); why == ypOK && authResp.ClientToken != "" {
 		authData.ClientToken = authResp.ClientToken
 	}
-	if authResp.SelectedProfile != nil {
-		authData.UUID = authResp.SelectedProfile.ID
-		authData.Username = authResp.SelectedProfile.Name
+	// 刷新响应若带角色资料，同样必须通过名校验与 UUID 归一；非法则保留旧身份不覆盖。
+	if profile, ok := pickYggProfile(authResp.SelectedProfile, authResp.AvailableProfiles); ok {
+		authData.UUID = profile.UUID
+		authData.Username = profile.Name
+	} else if authResp.SelectedProfile != nil {
+		recordSecurityEvent("auth", "medium", "ignore-ygg-profile", "RefreshExternalToken", "invalid refreshed profile")
 	}
-
-	return a.SaveExternalAuthData(id, authData)
+	return a.SaveExternalAuthData(username, authData)
 }
 
-// DownloadAuthlibInjector 下载 authlib-injector.jar
-func (a *App) DownloadAuthlibInjector() (string, error) {
-	qglDir := a.GetQGLDir()
-	jarPath := filepath.Join(qglDir, "authlib-injector.jar")
+// authlibJarMaxBytes 限制 authlib-injector.jar 下载体积。
+// 正常 jar 只有约 1 MiB，给到 64 MiB 只是为正常升级留余量；
+// 再大基本就是恶意/错误响应，必须在它炸磁盘前中止。
+const authlibJarMaxBytes = 64 << 20
 
-	// 如果已存在，直接返回
-	if _, err := os.Stat(jarPath); err == nil {
-		return jarPath, nil
+// authlibDownloadHosts 是允许下载 authlib jar 的主机白名单。
+// latest.json 里的 download_url 来自远程，绝不能无条件跟随：
+// 被劫持的元数据可能把它指向任意主机的木马 jar。
+var authlibDownloadHosts = map[string]bool{
+	"authlib-injector.yushi.moe": true,
+	"bmclapi2.bangbang93.com":    true,
+}
+
+// isAllowedAuthlibDownloadURL 只放行 https、无 userinfo、主机在白名单内的地址。
+func isAllowedAuthlibDownloadURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme != "https" || u.User != nil {
+		return false
 	}
+	return authlibDownloadHosts[strings.ToLower(u.Hostname())]
+}
 
-	if err := os.MkdirAll(qglDir, 0755); err != nil {
-		return "", fmt.Errorf("创建目录失败: %v", err)
-	}
-
-	// 参考 PCL：先获取 latest.json 获取下载地址，再下载 jar
+// fetchAuthlibLatest 从两个官方/镜像元数据端点获取下载地址与权威 SHA-256。
+// 两个字段缺一不可：没有哈希就无法保证下载到的 javaagent 没被掉包。
+func fetchAuthlibLatest() (downloadURL, expectedSHA256 string, err error) {
 	latestURLs := []string{
 		"https://authlib-injector.yushi.moe/artifact/latest.json",
 		"https://bmclapi2.bangbang93.com/mirrors/authlib-injector/artifact/latest.json",
 	}
-
-	var latestInfo map[string]interface{}
-	var downloadURL string
-
-	client := &http.Client{Timeout: 15 * time.Second}
-	for _, url := range latestURLs {
-		resp, err := client.Get(url)
-		if err != nil {
+	for _, u := range latestURLs {
+		resp, gerr := httpClient.Get(u)
+		if gerr != nil {
 			continue
 		}
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := readAuthJSON(resp)
 		resp.Body.Close()
-		if resp.StatusCode == 200 {
-			if err := json.Unmarshal(body, &latestInfo); err == nil {
-				if du, ok := latestInfo["download_url"].(string); ok && du != "" {
-					downloadURL = du
-					break
-				}
-			}
+		if resp.StatusCode != 200 {
+			continue
+		}
+		var info map[string]string
+		if jerr := json.Unmarshal(body, &info); jerr != nil {
+			continue
+		}
+		du := strings.TrimSpace(info["download_url"])
+		sha := strings.ToLower(strings.TrimSpace(info["sha256"]))
+		if du != "" && sha != "" && isAllowedAuthlibDownloadURL(du) {
+			return du, sha, nil
 		}
 	}
+	return "", "", fmt.Errorf("获取可信的 authlib-injector 下载地址/哈希失败")
+}
 
-	if downloadURL == "" {
-		return "", fmt.Errorf("获取 authlib-injector 下载地址失败")
+// downloadAuthlibJarFromCandidates 按顺序尝试候选地址，下载到临时文件，
+// 强制 SHA-256 校验通过、体积不超限后才 rename 到目标路径并写入侧车。
+func downloadAuthlibJarFromCandidates(jarPath string, candidates []string, expectedSHA256 string) error {
+	if len(expectedSHA256) == 0 {
+		return fmt.Errorf("缺少 authlib-injector 官方 SHA-256，拒绝下载")
 	}
-
-	// 替换为 BMCLAPI 镜像作为备用
-	mirrorURL := strings.ReplaceAll(downloadURL, "authlib-injector.yushi.moe", "bmclapi2.bangbang93.com/mirrors/authlib-injector")
-
-	downloadClient := &http.Client{Timeout: 120 * time.Second}
 	var lastErr error
-	for _, url := range []string{downloadURL, mirrorURL} {
-		resp, err := downloadClient.Get(url)
-		if err != nil {
+	for _, u := range candidates {
+		if !isAllowedAuthlibDownloadURL(u) {
+			lastErr = fmt.Errorf("下载地址不在可信主机白名单: %s", u)
+			continue
+		}
+		if err := func() error {
+			resp, err := httpClient.Get(u)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != 200 {
+				return fmt.Errorf("HTTP %d", resp.StatusCode)
+			}
+			// 用 O_EXCL 写同目录临时文件，绝不直接 O_TRUNC 覆盖正在被使用的 jar。
+			dir := filepath.Dir(jarPath)
+			tmp, err := os.OpenFile(filepath.Join(dir, ".authlib-*.jar.tmp"),
+				os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+			if err != nil {
+				return fmt.Errorf("创建临时文件失败: %w", err)
+			}
+			tmpName := tmp.Name()
+			abort := func(cause error) error {
+				tmp.Close()
+				os.Remove(tmpName)
+				return cause
+			}
+			// 多读 1 字节用于判定是否超限。
+			n, err := io.CopyN(tmp, resp.Body, authlibJarMaxBytes+1)
+			if err != nil && err != io.EOF {
+				return abort(fmt.Errorf("写入文件失败: %w", err))
+			}
+			if n > authlibJarMaxBytes {
+				return abort(fmt.Errorf("authlib-injector 体积超过 %d 字节上限", authlibJarMaxBytes))
+			}
+			if err := tmp.Close(); err != nil {
+				os.Remove(tmpName)
+				return fmt.Errorf("关闭临时文件失败: %w", err)
+			}
+
+			got, herr := sha256FileHex(tmpName)
+			if herr != nil {
+				os.Remove(tmpName)
+				return fmt.Errorf("计算哈希失败: %w", herr)
+			}
+			if !hmac.Equal([]byte(got), []byte(expectedSHA256)) {
+				os.Remove(tmpName)
+				return fmt.Errorf("文件哈希校验失败: 预期 %s, 实际 %s", expectedSHA256, got)
+			}
+			if err := os.Rename(tmpName, jarPath); err != nil {
+				os.Remove(tmpName)
+				return fmt.Errorf("替换 jar 失败: %w", err)
+			}
+			info, _ := os.Stat(jarPath)
+			var size int64
+			if info != nil {
+				size = info.Size()
+			}
+			if err := saveAuthlibMeta(jarPath, expectedSHA256, size); err != nil {
+				// jar 本体已可信，侧车写失败不应致命，下次启动会重新校验/下载。
+				removeAuthlibMeta(jarPath)
+			}
+			return nil
+		}(); err != nil {
 			lastErr = err
 			continue
 		}
-		defer resp.Body.Close()
-		if resp.StatusCode != 200 {
-			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
-			continue
-		}
+		return nil
+	}
+	return fmt.Errorf("下载 authlib-injector 失败: %v", lastErr)
+}
 
-		file, err := os.Create(jarPath)
-		if err != nil {
-			return "", fmt.Errorf("创建文件失败: %v", err)
-		}
-		if _, err := io.Copy(file, resp.Body); err != nil {
-			file.Close()
-			os.Remove(jarPath)
-			return "", fmt.Errorf("写入文件失败: %v", err)
-		}
-		file.Close()
-		return jarPath, nil
+// DownloadAuthlibInjector 下载并强校验 authlib-injector.jar（javaagent，可执行）。
+// 已存在的 jar 也必须通过侧车记录的官方 SHA-256 复核，绝不"文件在就直接用"。
+func (a *App) DownloadAuthlibInjector() (string, error) {
+	qglDir := a.GetQGLDir()
+	jarPath := filepath.Join(qglDir, "authlib-injector.jar")
+	if err := os.MkdirAll(qglDir, 0700); err != nil {
+		return "", fmt.Errorf("创建目录失败: %v", err)
 	}
 
-	return "", fmt.Errorf("下载 authlib-injector 失败: %v", lastErr)
+	downloadURL, expectedSHA256, err := fetchAuthlibLatest()
+	if err != nil {
+		// 拿不到权威哈希时，只有"已有 jar 且侧车自证完整"才可继续离线复用；
+		// 但侧车里的期望值同样来自上次官方哈希，此处无新值，保守起见要求网络可用。
+		return "", err
+	}
+
+	if _, statErr := os.Stat(jarPath); statErr == nil {
+		if verifyAuthlibJar(jarPath, expectedSHA256) {
+			return jarPath, nil
+		}
+		// 已存在但哈希不符 / 无侧车：可能被篡改或是旧版本，删除后重下。
+		os.Remove(jarPath)
+		removeAuthlibMeta(jarPath)
+	}
+
+	mirrorURL := strings.ReplaceAll(downloadURL,
+		"authlib-injector.yushi.moe",
+		"bmclapi2.bangbang93.com/mirrors/authlib-injector")
+	candidates := []string{downloadURL}
+	if isAllowedAuthlibDownloadURL(mirrorURL) && mirrorURL != downloadURL {
+		candidates = append(candidates, mirrorURL)
+	}
+	if err := downloadAuthlibJarFromCandidates(jarPath, candidates, expectedSHA256); err != nil {
+		return "", err
+	}
+	return jarPath, nil
 }
 
 // GetAuthlibInjectorPath 获取 authlib-injector.jar 路径（不存在则下载）

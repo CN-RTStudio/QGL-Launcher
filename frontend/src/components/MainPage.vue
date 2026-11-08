@@ -2,54 +2,34 @@
 import { ref, onMounted, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
-  GetCurrentUser, GetUsers, SetCurrentUser, GetInstalledVersions, ScanVersions,
+  GetCurrentUser, SetCurrentUser, GetInstalledVersions, ScanVersions,
   GetSelectedVersion, SetSelectedVersion, LaunchGame, IsVersionIsolation,
   SetVersionIsolation, GetRecommendedJavaForVersion, AddJavaToDownloadList,
-  StartDownloadList, GetLaunchCommand, GetShowExportLaunchCommand, ExitHelperMode,
-  GetGuestPermissions
+  StartDownloadList, GetLaunchCommand, GetShowExportLaunchCommand
 } from '../../wailsjs/go/main/App.js'
 import { EventsOn } from '../../wailsjs/runtime/runtime.js'
 import { useEasyQGL } from '../stores/easyQGL.js'
 import { showQGLDialog } from '../composables/qglDialog.js'
-import { showCrashDialog } from '../composables/crashDialog.js'
-import { useAvatars } from '../composables/avatar.js'
 
 const props = defineProps({
-  currentUser: Object,
-  helperMode: { type: Object, default: () => ({ active: false, dir: '' }) }
+  currentUser: Object
 })
 
-const emit = defineEmits(['navigate', 'logout', 'add-user', 'start-helper-setup', 'helper-exited'])
+const emit = defineEmits(['navigate', 'logout', 'add-user'])
 
 const { t } = useI18n()
 
-// 辅助模式
-const isHelperMode = computed(() => !!props.helperMode?.active)
-const helperDirName = computed(() => {
-  const dir = props.helperMode?.dir || ''
-  if (!dir) return ''
-  const parts = dir.split(/[\\/]/).filter(Boolean)
-  return parts[parts.length - 1] || dir
-})
-const exitingHelper = ref(false)
-
-async function exitHelper() {
-  exitingHelper.value = true
-  try {
-    await ExitHelperMode()
-    emit('helper-exited')
-  } catch {}
-  exitingHelper.value = false
+function cleanError(e) {
+  return String(e).replace('Error: ', '')
 }
 
 const currentUser = ref(props.currentUser || { username: 'Player', hasPassword: false, type: 'offline', isLocked: false })
 
 // 同步父组件的 currentUser 变化（如解锁后 isLocked 更新）
 watch(() => props.currentUser, (newVal) => {
-  if (newVal) {
-    currentUser.value = { ...newVal }
-  }
+  if (newVal) currentUser.value = { ...newVal }
 }, { deep: true })
+
 const installedVersions = ref([])
 const selectedVersion = ref('')
 const showUserList = ref(false)
@@ -63,6 +43,7 @@ const showExportLaunchBtn = ref(false)
 
 const tips = [
   '你知道吗？你不知道:D',
+  '注册个热土用户 id.rtstu.com 球球你了 :(',
   '你知道吗？其实我的世界最开始叫Cave Game',
   'QGL全称其实是QingLong Luncher 是哒~ 我们拼写错误了 变成"午餐器"啦 qwq',
   '为什么QingLong Luncher不叫QLL？因为不好听 :)',
@@ -76,32 +57,15 @@ const showTip = ref(false)
 
 const { state: easyQGL, enterModFirstMode, exitMode } = useEasyQGL()
 
-const { avatarMap, loadAvatar } = useAvatars()
-
 const isGuestLocked = computed(() => currentUser.value.type === 'guest' && currentUser.value.isLocked)
 
-// 真实头像（皮肤脸）：用户名变化时后台加载，加载前显示首字母
-watch(() => currentUser.value, (u) => { if (u) loadAvatar(u) }, { immediate: true })
-
-// 访客权限（guest.json）：仅影响锁定状态；解锁时所有功能均可用
-const guestPerms = ref({
-  allowDownload: true, allowMod: true, allowEasyQGL: true, allowSettings: true, allowQGLPlus: true, allowHelper: true,
-})
-const canSeeDownload = computed(() => !isGuestLocked.value || guestPerms.value.allowDownload)
-const canSeeMod = computed(() => !isGuestLocked.value || guestPerms.value.allowMod)
-const canSeeSettings = computed(() => !isGuestLocked.value || guestPerms.value.allowSettings)
-const canSeeEasyQGL = computed(() => !isGuestLocked.value || guestPerms.value.allowEasyQGL)
-const canSeeQGLPlus = computed(() => !isGuestLocked.value || guestPerms.value.allowQGLPlus)
-const canSeeHelper = computed(() => !isGuestLocked.value || guestPerms.value.allowHelper)
+function clearLaunchMsg() {
+  launchMsg.value = ''
+  launchMsgType.value = ''
+  showTip.value = false
+}
 
 onMounted(async () => {
-  // 访客用户加载权限配置
-  if (currentUser.value.type === 'guest') {
-    try {
-      const perms = await GetGuestPermissions()
-      if (perms) guestPerms.value = perms
-    } catch {}
-  }
   await refreshData()
   EventsOn('launchStatus', (status) => {
     if (status === 'fixing') {
@@ -114,7 +78,7 @@ onMounted(async () => {
       launchMsg.value = t('main.launchSuccess')
       launchMsgType.value = 'success'
       launching.value = false
-      setTimeout(() => { launchMsg.value = ''; launchMsgType.value = ''; showTip.value = false }, 3000)
+      setTimeout(clearLaunchMsg, 3000)
     } else if (status === 'timeout') {
       launchMsg.value = t('main.launchTimeout')
       launchMsgType.value = 'error'
@@ -133,20 +97,10 @@ onMounted(async () => {
     }
   })
 
-  // 启动补全阶段的实时步骤文本（含百分比），覆盖静态的"补全文件中..."
-  EventsOn('launchFixProgress', (step) => {
-    if (launching.value && step) {
-      launchMsg.value = step
-      launchMsgType.value = 'info'
-    }
-  })
-
-  // 加载导出启动命令按钮设置
-  try { showExportLaunchBtn.value = await GetShowExportLaunchCommand() } catch {}
+  try { showExportLaunchBtn.value = await GetShowExportLaunchCommand() } catch (e) { console.error('获取导出启动命令设置失败:', e) }
 })
 
 async function refreshData() {
-  // 并行加载所有数据
   const [userResult, versionsResult, selectedResult, isolationResult] = await Promise.allSettled([
     GetCurrentUser(),
     GetInstalledVersions(),
@@ -170,7 +124,7 @@ async function refreshData() {
 
   if (!selectedVersion.value && installedVersions.value.length > 0) {
     selectedVersion.value = installedVersions.value[0].folderName
-    try { await SetSelectedVersion(selectedVersion.value) } catch {}
+    try { await SetSelectedVersion(selectedVersion.value) } catch (e) { console.error('设置默认版本失败:', e) }
   }
 
   if (isolationResult.status === 'fulfilled') {
@@ -180,7 +134,6 @@ async function refreshData() {
 
 async function showSwitchUser() {
   if (isGuestLocked.value) return
-  // 直接跳转到登录页面（和设置页的切换账户一致）
   emit('logout')
 }
 
@@ -190,9 +143,11 @@ async function selectUser(user) {
     emit('logout')
   } else {
     try {
-      await SetCurrentUser(user.dir || user.username)
+      await SetCurrentUser(user.username)
       currentUser.value = user
-    } catch {}
+    } catch (e) {
+      console.error('切换用户失败:', e)
+    }
   }
 }
 
@@ -204,12 +159,13 @@ async function showVersionSelect() {
   try {
     const versions = await ScanVersions()
     installedVersions.value = versions || []
-    // 如果当前选中的版本不在列表中，选中第一个
     if (installedVersions.value.length > 0 && !installedVersions.value.find(v => v.folderName === selectedVersion.value)) {
       selectedVersion.value = installedVersions.value[0].folderName
-      try { await SetSelectedVersion(selectedVersion.value) } catch {}
+      try { await SetSelectedVersion(selectedVersion.value) } catch (e) { console.error('设置选中版本失败:', e) }
     }
-  } catch {} finally {
+  } catch (e) {
+    console.error('扫描游戏版本失败:', e)
+  } finally {
     versionListLoading.value = false
   }
 }
@@ -217,15 +173,10 @@ async function showVersionSelect() {
 async function selectVersion(ver) {
   selectedVersion.value = ver.folderName
   showVersionList.value = false
-  try { await SetSelectedVersion(ver.folderName) } catch {}
+  try { await SetSelectedVersion(ver.folderName) } catch (e) { console.error('设置选中版本失败:', e) }
 }
 
 async function handleLaunch() {
-  // 辅助模式下启动按钮变为"退出辅助模式"
-  if (isHelperMode.value) {
-    await exitHelper()
-    return
-  }
   if (!selectedVersion.value) {
     launchMsg.value = t('main.selectVersionFirst')
     launchMsgType.value = 'error'
@@ -239,27 +190,26 @@ async function handleLaunch() {
   try {
     await LaunchGame(selectedVersion.value)
   } catch (e) {
-    const errMsg = String(e).replace('Error: ', '')
+    const errMsg = cleanError(e)
     launching.value = false
 
-    // 检测是否为 Java 不兼容的错误，自动加入下载列表并开始下载
-    if (errMsg.includes('Java 选择失败') || errMsg.includes('未找到') && errMsg.includes('Java')) {
+    if (errMsg.includes('Java 选择失败') || (errMsg.includes('未找到') && errMsg.includes('Java'))) {
       try {
         const recJava = await GetRecommendedJavaForVersion(selectedVersion.value)
         if (recJava > 0) {
           await AddJavaToDownloadList(recJava)
-          try { await StartDownloadList() } catch {}
+          try { await StartDownloadList() } catch (err) { console.error('开始下载列表失败:', err) }
           launchMsg.value = t('main.javaAutoDownloaded', { version: recJava })
           launchMsgType.value = 'info'
           return
         }
-      } catch {}
+      } catch (err) {
+        console.error('获取推荐Java版本失败:', err)
+      }
     }
 
-    // 状态栏只简单显示"启动失败"，详细错误进崩溃弹窗
-    launchMsg.value = t('main.launchFailedSimple')
+    launchMsg.value = t('main.launchFailed') + errMsg
     launchMsgType.value = 'error'
-    showCrashDialog({ title: t('crash.titleFailed'), reason: errMsg })
   }
 }
 
@@ -267,7 +217,9 @@ async function toggleVersionIsolation() {
   try {
     await SetVersionIsolation(!versionIsolation.value)
     versionIsolation.value = !versionIsolation.value
-  } catch {}
+  } catch (e) {
+    console.error('切换版本隔离失败:', e)
+  }
 }
 
 async function handleExportLaunchCommand() {
@@ -286,7 +238,6 @@ async function handleExportLaunchCommand() {
       btn2Label: t('main.exportLaunchCommandBtn2'),
     })
     if (btnIndex === 1) {
-      // 复制并关闭
       try {
         await navigator.clipboard.writeText(cmd)
       } catch {
@@ -301,7 +252,7 @@ async function handleExportLaunchCommand() {
       }
     }
   } catch (e) {
-    const errMsg = String(e).replace('Error: ', '')
+    const errMsg = cleanError(e)
     await showQGLDialog({
       theme: 'error',
       title: t('main.exportLaunchCommandTitle'),
@@ -337,8 +288,7 @@ const userTypeLabel = computed(() => {
       <!-- 用户信息区域 -->
       <div class="user-section">
         <div class="user-card">
-          <img v-if="avatarMap[currentUser.username]" class="user-avatar-large" :src="avatarMap[currentUser.username]" alt="" />
-          <div v-else class="user-avatar-large">{{ currentUser.username?.charAt(0).toUpperCase() || 'P' }}</div>
+          <div class="user-avatar-large">{{ currentUser.username?.charAt(0).toUpperCase() || 'P' }}</div>
           <div class="user-detail">
             <div class="user-name-large">
               {{ currentUser.username || 'Player' }}
@@ -346,7 +296,7 @@ const userTypeLabel = computed(() => {
             </div>
             <div class="user-status">
               {{ userTypeLabel }}
-              <span v-if="isGuestLocked" class="lock-hint">{{ t('main.locked') }}</span>
+              <span v-if="isGuestLocked" class="lock-hint">（{{ t('main.locked') }}）</span>
             </div>
           </div>
         </div>
@@ -354,31 +304,18 @@ const userTypeLabel = computed(() => {
 
       <!-- 功能按钮区域 -->
       <div class="action-section">
-        <button class="action-btn" :class="{ 'helper-disabled': isHelperMode }" :disabled="isGuestLocked || isHelperMode" @click="showSwitchUser">
+        <button class="action-btn" :disabled="isGuestLocked" @click="showSwitchUser">
           <span class="action-icon">&#x1F464;</span>
           <span class="action-text">{{ t('main.switchUser') }}</span>
         </button>
 
-        <button class="action-btn" :class="{ 'helper-disabled': isHelperMode }" :disabled="isHelperMode" @click="showVersionSelect">
+        <button class="action-btn" @click="showVersionSelect">
           <span class="action-icon">&#x1F4E6;</span>
           <span class="action-text">{{ t('main.switchVersion') }}</span>
           <span class="action-hint">{{ displayVersion }}</span>
         </button>
 
-        <!-- 辅助模式：启动按钮变为退出辅助模式 -->
         <button
-          v-if="isHelperMode"
-          class="launch-btn helper-exit-btn"
-          :disabled="exitingHelper"
-          @click="handleLaunch"
-        >
-          <span v-if="exitingHelper" class="spin" style="display:inline-block;">&#x2699;</span>
-          <span v-else>&#x2715;</span>
-          <span>{{ t('main.exitHelperMode') }}</span>
-          <span class="launch-version">{{ helperDirName }}</span>
-        </button>
-        <button
-          v-else
           class="launch-btn"
           :disabled="launching || !selectedVersion"
           @click="handleLaunch"
@@ -390,19 +327,14 @@ const userTypeLabel = computed(() => {
         </button>
 
         <button
-          v-if="showExportLaunchBtn && selectedVersion && !isHelperMode"
+          v-if="showExportLaunchBtn && selectedVersion"
           class="export-cmd-btn"
           @click="handleExportLaunchCommand"
         >
           &#x1F4CB; {{ t('main.exportLaunchCommand') }}
         </button>
 
-        <!-- 辅助模式小提示常显 -->
-        <div v-if="isHelperMode" class="tip-box helper-tip">
-          <span class="tip-label">{{ t('main.tip') }}</span>
-          <span class="tip-content">{{ t('main.helperTip') }}</span>
-        </div>
-        <div v-else-if="showTip" class="tip-box">
+        <div v-if="showTip" class="tip-box">
           <span class="tip-label">{{ t('main.tip') }}</span>
           <span class="tip-content">{{ randomTip }}</span>
         </div>
@@ -434,7 +366,7 @@ const userTypeLabel = computed(() => {
 
         <div class="feature-cards">
           <div
-            v-if="canSeeDownload"
+            v-if="!isGuestLocked"
             class="feature-card"
             @click="emit('navigate', 'download')"
           >
@@ -444,10 +376,8 @@ const userTypeLabel = computed(() => {
           </div>
 
           <div
-            v-if="canSeeMod"
             class="feature-card"
-            :class="{ 'helper-disabled': isHelperMode }"
-            @click="!isHelperMode && emit('navigate', 'mod')"
+            @click="emit('navigate', 'mod')"
           >
             <div class="feature-icon">&#x1F4E6;</div>
             <div class="feature-name">{{ t('main.modManage') }}</div>
@@ -455,7 +385,7 @@ const userTypeLabel = computed(() => {
           </div>
 
           <div
-            v-if="canSeeSettings"
+            v-if="!isGuestLocked"
             class="feature-card"
             @click="emit('navigate', 'settings')"
           >
@@ -465,7 +395,7 @@ const userTypeLabel = computed(() => {
           </div>
 
           <div
-            v-if="canSeeEasyQGL"
+            v-if="!isGuestLocked"
             class="feature-card easy-qgl-card"
             @click="emit('navigate', 'easyqgl')"
           >
@@ -475,20 +405,9 @@ const userTypeLabel = computed(() => {
           </div>
 
           <div
-            v-if="canSeeHelper"
-            class="feature-card helper-card"
-            @click="emit('start-helper-setup')"
-          >
-            <div class="feature-icon">&#x1F6E0;</div>
-            <div class="feature-name">{{ t('main.helperFeature') }}</div>
-            <div class="feature-desc">{{ t('main.helperFeatureDesc') }}</div>
-          </div>
-
-          <div
-            v-if="canSeeQGLPlus"
+            v-if="!isGuestLocked"
             class="feature-card qglplus-card"
-            :class="{ 'helper-disabled': isHelperMode }"
-            @click="!isHelperMode && emit('navigate', 'qglplus')"
+            @click="emit('navigate', 'qglplus')"
           >
             <div class="feature-icon">&#x1F3AE;</div>
             <div class="feature-name">QGLPlus</div>
@@ -505,6 +424,9 @@ const userTypeLabel = computed(() => {
       </div>
 
       <!-- 版权信息 -->
+      <div class="copyright">
+        &copy; 2026 {{ t('main.copyright').replace('© 2026 ', '') }}
+      </div>
     </div>
 
     <!-- 用户列表弹窗 -->
@@ -577,13 +499,14 @@ const userTypeLabel = computed(() => {
 .left-panel {
   width: 320px;
   min-width: 280px;
-  background: rgba(255, 255, 255, 0.92);
+  background: var(--glass-bg-heavy);
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
   border-right: 1px solid var(--glass-border);
   display: flex;
   flex-direction: column;
   padding: 24px 20px;
+  transition: background 0.3s;
 }
 
 .user-section {
@@ -602,21 +525,12 @@ const userTypeLabel = computed(() => {
   border-radius: 12px;
 }
 
-/* 真实头像（img）：无背景容器，透明显不规则形状 */
-img.user-avatar-large {
-  background: transparent;
-  box-shadow: none;
-  border: none;
-}
-
 .user-avatar-large {
   width: 52px;
   height: 52px;
   background: var(--primary);
   color: white;
-  border-radius: 10px;
-  object-fit: cover;
-  flex-shrink: 0;
+  border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -757,8 +671,8 @@ img.user-avatar-large {
   gap: 8px;
   margin-top: 10px;
   padding: 8px 12px;
-  background: color-mix(in srgb, var(--primary, #2196F3) 12%, transparent);
-  border: 1px solid color-mix(in srgb, var(--primary, #2196F3) 30%, transparent);
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--primary) 30%, transparent);
   border-radius: 8px;
   font-size: 12px;
   line-height: 1.5;
@@ -768,7 +682,7 @@ img.user-avatar-large {
 .tip-label {
   flex-shrink: 0;
   padding: 1px 6px;
-  background: var(--primary, #2196F3);
+  background: var(--primary);
   color: #fff;
   border-radius: 4px;
   font-size: 11px;
@@ -777,7 +691,7 @@ img.user-avatar-large {
 }
 
 .tip-content {
-  color: rgba(0, 0, 0, 0.75);
+  color: var(--text-secondary);
 }
 
 .launch-version {
@@ -796,17 +710,9 @@ img.user-avatar-large {
   margin-top: 4px;
 }
 
-.launch-msg.info {
-  color: var(--primary);
-}
-
-.launch-msg.success {
-  color: var(--success);
-}
-
-.launch-msg.error {
-  color: var(--danger);
-}
+.launch-msg.info { color: var(--primary); }
+.launch-msg.success { color: var(--success); }
+.launch-msg.error { color: var(--danger); }
 
 .launch-msg-glass {
   text-align: center;
@@ -879,7 +785,7 @@ img.user-avatar-large {
 .feature-card {
   width: 200px;
   padding: 24px 20px;
-  background: rgba(255, 255, 255, 0.78);
+  background: var(--glass-bg-light);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border: 1.5px solid var(--border);
@@ -890,7 +796,7 @@ img.user-avatar-large {
 
 .feature-card:hover {
   border-color: var(--primary);
-  box-shadow: 0 4px 16px rgba(0, 188, 212, 0.1);
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--primary) 15%, transparent);
 }
 
 .feature-icon {
@@ -911,25 +817,25 @@ img.user-avatar-large {
 }
 
 .easy-qgl-card {
-  border-color: #FF9800;
-  background: rgba(255, 152, 0, 0.06);
+  border-color: var(--easy-orange, #FF9800);
+  background: color-mix(in srgb, var(--easy-orange, #FF9800) 6%, transparent);
 }
 
 .easy-qgl-card:hover {
-  border-color: #F57C00;
-  box-shadow: 0 4px 16px rgba(255, 152, 0, 0.15);
-  background: rgba(255, 152, 0, 0.1);
+  border-color: var(--easy-orange-dark, #F57C00);
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--easy-orange, #FF9800) 20%, transparent);
+  background: color-mix(in srgb, var(--easy-orange, #FF9800) 10%, transparent);
 }
 
 .qglplus-card {
-  border-color: #4CAF50;
-  background: rgba(76, 175, 80, 0.06);
+  border-color: var(--qglplus-green, #4CAF50);
+  background: color-mix(in srgb, var(--qglplus-green, #4CAF50) 6%, transparent);
 }
 
 .qglplus-card:hover {
-  border-color: #388E3C;
-  box-shadow: 0 4px 16px rgba(76, 175, 80, 0.15);
-  background: rgba(76, 175, 80, 0.1);
+  border-color: var(--qglplus-green-dark, #388E3C);
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--qglplus-green, #4CAF50) 20%, transparent);
+  background: color-mix(in srgb, var(--qglplus-green, #4CAF50) 10%, transparent);
 }
 
 .locked-notice {
@@ -986,20 +892,15 @@ img.user-avatar-large {
   transition: background 0.15s;
 }
 
-.user-item:hover {
-  background: var(--primary-bg);
-}
-
-.user-item.active {
-  background: var(--primary-bg);
-}
+.user-item:hover { background: var(--primary-bg); }
+.user-item.active { background: var(--primary-bg); }
 
 .user-avatar {
   width: 40px;
   height: 40px;
   background: var(--primary-light);
   color: var(--primary-dark);
-  border-radius: 8px;
+  border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1044,13 +945,8 @@ img.user-avatar-large {
   transition: background 0.15s;
 }
 
-.version-item:hover {
-  background: var(--primary-bg);
-}
-
-.version-item.active {
-  background: var(--primary-bg);
-}
+.version-item:hover { background: var(--primary-bg); }
+.version-item.active { background: var(--primary-bg); }
 
 .version-name {
   font-size: 14px;
@@ -1090,9 +986,7 @@ img.user-avatar-large {
   transition: background 0.15s;
 }
 
-.add-user-option:hover {
-  background: var(--primary-bg);
-}
+.add-user-option:hover { background: var(--primary-bg); }
 
 .add-user-icon {
   width: 32px;
@@ -1106,40 +1000,5 @@ img.user-avatar-large {
   font-size: 18px;
   font-weight: 600;
   color: var(--primary);
-}
-
-/* ===== 辅助模式 ===== */
-.helper-disabled {
-  opacity: 0.4 !important;
-  cursor: not-allowed !important;
-  filter: grayscale(0.8);
-  pointer-events: none;
-}
-
-.helper-card .feature-icon {
-  color: #9C27B0;
-  text-shadow: 0 0 12px rgba(156, 39, 176, 0.4);
-}
-
-.helper-card:hover {
-  border-color: #9C27B0;
-  box-shadow: 0 4px 16px rgba(156, 39, 176, 0.25);
-}
-
-.helper-exit-btn {
-  background: linear-gradient(135deg, #9C27B0, #7B1FA2) !important;
-}
-
-.helper-exit-btn:hover:not(:disabled) {
-  background: linear-gradient(135deg, #AB47BC, #8E24AA) !important;
-}
-
-.helper-tip {
-  border-color: rgba(156, 39, 176, 0.5);
-}
-
-.helper-tip .tip-content {
-  color: #9C27B0;
-  font-weight: 600;
 }
 </style>

@@ -57,12 +57,7 @@ type PackFilterAudit struct {
 }
 
 func (a PackFilterAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f PackFilterFinding) bool { return f.Blocking })
 }
 
 func (a PackFilterAudit) HasWarnings() bool {

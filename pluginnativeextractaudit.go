@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -69,26 +68,13 @@ func (a *PnhAudit) HasWarnings() bool {
 }
 
 func (a *PnhAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return fmt.Sprintf("插件归档通过检查，共 %d 个 jar，未发现内嵌原生二进制", a.Jars)
-	}
-	sorted := make([]PnhFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Reason != sorted[j].Reason {
-			return sorted[i].Reason < sorted[j].Reason
-		}
-		return sorted[i].Entry < sorted[j].Entry
-	})
-	parts := make([]string, 0, len(sorted))
-	for i, f := range sorted {
-		if i >= 8 {
-			parts = append(parts, fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		parts = append(parts, f.Reason)
-	}
-	return strings.Join(parts, "；")
+	return describeAuditFindings(fmt.Sprintf("插件归档通过检查，共 %d 个 jar，未发现内嵌原生二进制", a.Jars), a.Findings, 8,
+		func(f PnhFinding) []string {
+			return []string{f.Reason, f.Entry}
+		},
+		func(f PnhFinding) string {
+			return f.Reason
+		})
 }
 
 func pnhExt(name string) string {

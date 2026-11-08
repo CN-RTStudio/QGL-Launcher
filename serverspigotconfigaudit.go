@@ -69,15 +69,7 @@ func (a *SpigotAudit) Describe() string {
 }
 
 func sptHasControlChars(text string) bool {
-	for _, r := range text {
-		if r == '\t' || r == '\n' || r == '\r' {
-			continue
-		}
-		if r < 0x20 || r == 0x7f {
-			return true
-		}
-	}
-	return false
+	return hasControlCharsText(text)
 }
 
 func AuditServerSpigotConfig(serverDir string) *SpigotAudit {

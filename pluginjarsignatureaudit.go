@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -61,26 +60,13 @@ func (a *PjsAudit) HasWarnings() bool {
 }
 
 func (a *PjsAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return fmt.Sprintf("插件签名检查通过，%d 个 jar，其中 %d 个已签名", a.Jars, a.Signed)
-	}
-	sorted := make([]PjsFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Reason != sorted[j].Reason {
-			return sorted[i].Reason < sorted[j].Reason
-		}
-		return sorted[i].Jar < sorted[j].Jar
-	})
-	parts := make([]string, 0, len(sorted))
-	for i, f := range sorted {
-		if i >= 8 {
-			parts = append(parts, fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		parts = append(parts, f.Reason)
-	}
-	return strings.Join(parts, "；")
+	return describeAuditFindings(fmt.Sprintf("插件签名检查通过，%d 个 jar，其中 %d 个已签名", a.Jars, a.Signed), a.Findings, 8,
+		func(f PjsFinding) []string {
+			return []string{f.Reason, f.Jar}
+		},
+		func(f PjsFinding) string {
+			return f.Reason
+		})
 }
 
 func pjsSignatureEntry(name string) (kind string, ok bool) {

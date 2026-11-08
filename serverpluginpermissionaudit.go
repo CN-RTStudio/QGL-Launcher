@@ -218,7 +218,7 @@ func plugPermInspect(audit *PluginPermissionAudit, path, display string) {
 		audit.add(display, 0, plugPermReasonTooLarge, "插件配置超过大小上限", true)
 		return
 	}
-	data, err := os.ReadFile(path)
+	data, err := readBoundedFile(path, auditTextReadMaxBytes)
 	if err != nil {
 		audit.add(display, 0, plugPermReasonUnreadable, "插件配置不可读", true)
 		return

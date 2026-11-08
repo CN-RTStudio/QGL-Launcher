@@ -264,6 +264,23 @@ func SafeMojmapsMappingsPath(mcDir, coord, ext string) (string, bool) {
 	return target, true
 }
 
+// SafeMappingsVersionPath 由安装器 install_profile.json 里的 data.MOJMAPS.version
+// 推导旧版 Forge mappings 的落盘路径。version 来自不可信 JSON，先过 SafeSimpleName
+// 严格白名单（拒绝分隔符、冒号、".."、保留设备名），最终再用 PathWithinRoot 约束
+// 结果必须仍在 <mcDir>/libraries 之下。
+func SafeMappingsVersionPath(mcDir, version string) (string, bool) {
+	v := SafeSimpleName(version)
+	if v == "" {
+		return "", false
+	}
+	target := filepath.Join(mcDir, "libraries", "net", "minecraft", "client", v,
+		"client-"+v+"-mappings.txt")
+	if !PathWithinRoot(target, filepath.Join(mcDir, "libraries")) {
+		return "", false
+	}
+	return target, true
+}
+
 // safeMappingsExt 限制 mappings 扩展名只能是不超过 8 个字符的小写字母数字（官方为 txt）。
 func safeMappingsExt(ext string) bool {
 	if ext == "" || len(ext) > 8 {

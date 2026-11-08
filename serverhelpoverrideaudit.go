@@ -126,35 +126,17 @@ func (a *HelpOverrideAudit) add(file, topic, reason, detail string, blocking boo
 }
 
 func hoCheckFile(audit *HelpOverrideAudit, rel string) bool {
-	path := filepath.Join(audit.Dir, filepath.FromSlash(rel))
-	info, err := os.Lstat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			audit.add(rel, "", hoReasonMissing, "帮助配置不存在", false)
-		} else {
-			audit.add(rel, "", hoReasonUnreadable, err.Error(), false)
-		}
-		return false
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		audit.add(rel, "", hoReasonSymlink, "帮助配置是符号链接", true)
-		return false
-	}
-	if !info.Mode().IsRegular() {
-		audit.add(rel, "", hoReasonUnreadable, "帮助配置不是普通文件", true)
-		return false
-	}
-	if info.Size() > hoMaxFileBytes {
-		audit.add(rel, "", hoReasonTooLarge, fmt.Sprintf("帮助配置 %d 字节", info.Size()), true)
-		return false
-	}
-	if info.Mode().Perm()&0o022 != 0 {
-		audit.add(rel, "", hoReasonWorldWritable, fmt.Sprintf("权限 %#o 允许他人写入", info.Mode().Perm()), true)
-	}
-	if info.Mode().Perm()&0o004 != 0 {
-		audit.add(rel, "", hoReasonWorldReadable, fmt.Sprintf("权限 %#o 允许他人读取", info.Mode().Perm()), false)
-	}
-	return true
+	return checkServerCfgFile(audit.Dir, rel, hoMaxFileBytes,
+		cfgFileReasons{
+			Missing:       hoReasonMissing,
+			Unreadable:    hoReasonUnreadable,
+			Symlink:       hoReasonSymlink,
+			TooLarge:      hoReasonTooLarge,
+			WorldWritable: hoReasonWorldWritable,
+			WorldReadable: hoReasonWorldReadable,
+		},
+		cfgFileLabels{Noun: "帮助配置", SizeLabel: "帮助配置"},
+		func(reason, detail string, blocking bool) { audit.add(rel, "", reason, detail, blocking) })
 }
 
 func hoIndentOf(line string) int {

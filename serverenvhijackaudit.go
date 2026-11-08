@@ -249,7 +249,7 @@ func envInspectScript(audit *EnvHijackAudit, serverDir, name string) {
 		audit.add(name, "", envReasonTooLarge, "启动脚本超过大小上限", true)
 		return
 	}
-	data, err := os.ReadFile(path)
+	data, err := readBoundedFile(path, auditTextReadMaxBytes)
 	if err != nil {
 		audit.add(name, "", envReasonUnreadable, "启动脚本不可读", true)
 		return

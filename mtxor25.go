@@ -202,8 +202,6 @@ func (m *mtXOR25) RandInt(a, b int64) int64 {
 }
 
 // 包级便捷入口。
-func mtXor25Uniform(low, high float64) float64 { return globalMTXOR25().Uniform(low, high) }
-func mtXor25RandInt(a, b int64) int64          { return globalMTXOR25().RandInt(a, b) }
 
 // bytes 顺序拼接 nextBlock 的 16 字节块，返回恰好 n 字节的 mt_xor25 随机流。
 // 与 Python 端按块 out_q 取流一致；n<=0 返回空切片。

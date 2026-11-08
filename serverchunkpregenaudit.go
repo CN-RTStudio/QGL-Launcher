@@ -47,16 +47,11 @@ func (a *PregenAudit) add(file, reason, detail string, blocking bool) {
 }
 
 func (a *PregenAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f PregenFinding) bool { return f.Blocking })
 }
 
 func (a *PregenAudit) HasWarnings() bool {
-	return len(a.Findings) > 0
+	return hasAny(a.Findings)
 }
 
 func (a *PregenAudit) Describe() string {

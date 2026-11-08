@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
-	"sort"
 	"strings"
 	"unicode/utf8"
 )
@@ -61,34 +60,16 @@ func (a *QueryExposureAudit) HasWarnings() bool {
 }
 
 func (a *QueryExposureAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return "对外暴露相关配置未发现风险"
-	}
-	sorted := make([]QueryExposureFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Reason != sorted[j].Reason {
-			return sorted[i].Reason < sorted[j].Reason
-		}
-		return sorted[i].Detail < sorted[j].Detail
-	})
-	var b strings.Builder
-	for i, f := range sorted {
-		if i >= 9 {
-			b.WriteString(fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		if i > 0 {
-			b.WriteString("；")
-		}
-		b.WriteString(f.Reason)
-		if f.Detail != "" {
-			b.WriteString("(")
-			b.WriteString(f.Detail)
-			b.WriteString(")")
-		}
-	}
-	return b.String()
+	return describeAuditFindings("对外暴露相关配置未发现风险", a.Findings, 9,
+		func(f QueryExposureFinding) []string {
+			return []string{f.Reason, f.Detail}
+		},
+		func(f QueryExposureFinding) string {
+			if f.Detail == "" {
+				return f.Reason
+			}
+			return f.Reason + "(" + f.Detail + ")"
+		})
 }
 
 func syqHasControl(text string) bool {
@@ -165,25 +146,25 @@ func AuditServerQueryExposure(serverDir string) *QueryExposureAudit {
 		}
 	}
 	if raw, ok := props["server-port"]; ok {
-		value, bad := cfgParseInt(raw)
-		if bad || value < 1 || value > 65535 {
+		value, parsed := cfgParseInt(raw)
+		if !parsed || value < 1 || value > 65535 {
 			a.add(syqPortInvalid, "server-port 不是合法端口", true)
 		} else if value < 1024 {
 			a.add(syqPortLow, fmt.Sprintf("server-port=%d 属于特权端口段", value), false)
 		}
 	}
 	if raw, ok := props["max-players"]; ok {
-		if value, bad := cfgParseInt(raw); bad || value <= 0 {
+		if value, parsed := cfgParseInt(raw); !parsed || value <= 0 {
 			a.add(syqMaxPlayers, "max-players 不是正整数", false)
 		}
 	}
 	if raw, ok := props["view-distance"]; ok {
-		if value, bad := cfgParseInt(raw); !bad && value > 16 {
+		if value, parsed := cfgParseInt(raw); parsed && value > 16 {
 			a.add(syqViewDistance, fmt.Sprintf("view-distance=%d 超过 16", value), false)
 		}
 	}
 	if raw, ok := props["network-compression-threshold"]; ok {
-		if value, bad := cfgParseInt(raw); !bad && value < 0 {
+		if value, parsed := cfgParseInt(raw); parsed && value < 0 {
 			a.add(syqNetCompress, "network-compression-threshold 为负值", false)
 		}
 	}

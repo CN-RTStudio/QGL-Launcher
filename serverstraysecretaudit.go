@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -64,17 +63,7 @@ func (a *ServerStraySecretAudit) HasWarnings() bool {
 }
 
 func (a *ServerStraySecretAudit) Codes() []string {
-	seen := map[string]bool{}
-	codes := make([]string, 0, len(a.Findings))
-	for _, f := range a.Findings {
-		if seen[f.Reason] {
-			continue
-		}
-		seen[f.Reason] = true
-		codes = append(codes, f.Reason)
-	}
-	sort.Strings(codes)
-	return codes
+	return findingCodes(a.Findings, func(f StraySecretFinding) string { return f.Reason })
 }
 
 func (a *ServerStraySecretAudit) Describe() string {

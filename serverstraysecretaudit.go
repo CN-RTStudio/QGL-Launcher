@@ -54,12 +54,7 @@ func (a *ServerStraySecretAudit) Blocking() bool {
 }
 
 func (a *ServerStraySecretAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != strayReasonOK {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f StraySecretFinding) bool { return !f.Blocking && f.Reason != strayReasonOK })
 }
 
 func (a *ServerStraySecretAudit) Codes() []string {

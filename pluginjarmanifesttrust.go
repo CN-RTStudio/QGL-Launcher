@@ -4,8 +4,6 @@ import (
 	"archive/zip"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -142,67 +140,15 @@ func pjmClassPathEntry(raw string) bool {
 
 func AuditPluginManifestTrust(serverDir string) *PjmAudit {
 	a := &PjmAudit{ServerDir: serverDir}
-	if serverDir == "" {
-		a.add("plugins", "", pjmMiss, "未配置服务器目录", false)
-		return a
-	}
-
-	dir := filepath.Join(serverDir, "plugins")
-	info, err := os.Stat(dir)
-	if err != nil || !info.IsDir() {
-		a.add("plugins", "", pjmMiss, "缺少插件目录", false)
-		return a
-	}
-	link, err := isSymlinkOrSpecial(dir)
-	if err != nil {
-		a.add("plugins", "", pjmRead, err.Error(), true)
-		return a
-	}
-	if link {
-		a.add("plugins", "", pjmLink, "插件目录是符号链接或特殊文件", true)
-		return a
-	}
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		a.add("plugins", "", pjmRead, "无法读取插件目录", true)
-		return a
-	}
-
 	agentKeys := []string{"Agent-Class", "Premain-Class", "Launcher-Agent-Class"}
-
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(name), ".jar") {
-			continue
-		}
-		a.Jars++
-		path := filepath.Join(dir, name)
-		link, err := isSymlinkOrSpecial(path)
-		if err != nil {
-			a.add(name, "", pjmJarOpen, err.Error(), true)
-			continue
-		}
-		if link {
-			a.add(name, "", pjmJarLink, "jar 是符号链接或特殊文件", true)
-			continue
-		}
-		info, err := os.Stat(path)
-		if err != nil {
-			a.add(name, "", pjmJarOpen, "jar 无法访问", true)
-			continue
-		}
-		if info.Size() > pjmMaxJarSize {
-			a.add(name, "", pjmJarSize, fmt.Sprintf("jar %d 字节超过上限", info.Size()), false)
-			continue
-		}
-
-		archive, err := zip.OpenReader(path)
-		if err != nil {
-			a.add(name, "", pjmJarOpen, "jar 不是合法 zip", true)
-			continue
-		}
-
+	walk := walkPluginJars(serverDir, pjmMaxJarSize, pluginJarWalkReasons{
+		Missing: pjmMiss,
+		Read:    pjmRead,
+		DirLink: pjmLink,
+		JarLink: pjmJarLink,
+		JarOpen: pjmJarOpen,
+		JarSize: pjmJarSize,
+	}, func(name string, archive *zip.ReadCloser) {
 		for _, file := range archive.File {
 			entryName := strings.ToUpper(strings.TrimPrefix(file.Name, "/"))
 			if entryName != "META-INF/MANIFEST.MF" {
@@ -247,9 +193,11 @@ func AuditPluginManifestTrust(serverDir string) *PjmAudit {
 				a.add(name, file.Name, pjmMainClass, "Main-Class="+v, false)
 			}
 		}
-		archive.Close()
+	})
+	a.Jars = walk.Jars
+	for _, issue := range walk.Issues {
+		a.add(issue.Jar, issue.Entry, issue.Reason, issue.Detail, issue.Blocking)
 	}
-
 	if a.Jars > pjmMaxJars {
 		a.add("plugins", "", pjmJarSize, fmt.Sprintf("jar 数量 %d 超过上限", a.Jars), false)
 	}

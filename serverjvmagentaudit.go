@@ -58,12 +58,7 @@ func (a JVMAgentAudit) Blocking() bool {
 }
 
 func (a JVMAgentAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != jaReasonOK {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f JVMAgentFinding) bool { return !f.Blocking && f.Reason != jaReasonOK })
 }
 
 func (a JVMAgentAudit) Describe() string {

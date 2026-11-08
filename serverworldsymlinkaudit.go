@@ -44,16 +44,11 @@ func (a *WorldSymlinkAudit) add(path, reason, detail string, blocking bool) {
 }
 
 func (a *WorldSymlinkAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f WorldSymlinkFinding) bool { return f.Blocking })
 }
 
 func (a *WorldSymlinkAudit) HasWarnings() bool {
-	return len(a.Findings) > 0
+	return hasAny(a.Findings)
 }
 
 func (a *WorldSymlinkAudit) Describe() string {

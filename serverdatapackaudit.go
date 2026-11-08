@@ -48,12 +48,7 @@ type DataPackAudit struct {
 }
 
 func (a DataPackAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f DataPackFinding) bool { return f.Blocking })
 }
 
 func (a DataPackAudit) HasWarnings() bool {

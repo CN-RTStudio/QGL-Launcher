@@ -215,26 +215,6 @@ func scbCheckSpigot(a *CommandBlockAudit, flat map[string]string, text string) {
 	}
 }
 
-func scbSplitList(value string) []string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil
-	}
-	value = strings.TrimPrefix(value, "[")
-	value = strings.TrimSuffix(value, "]")
-	parts := strings.Split(value, ",")
-	items := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		part = cfgStripQuotes(part)
-		if part == "" {
-			continue
-		}
-		items = append(items, part)
-	}
-	return items
-}
-
 func scbScanSpamExclusions(text string) []string {
 	lines := strings.Split(text, "\n")
 	items := make([]string, 0, 16)

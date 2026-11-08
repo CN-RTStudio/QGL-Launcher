@@ -129,7 +129,7 @@ func AuditPlayerCache(serverDir string) (PlayerCacheAudit, error) {
 		})
 		return audit, nil
 	}
-	data, err := os.ReadFile(audit.Path)
+	data, err := readBoundedFile(audit.Path, auditTextReadMaxBytes)
 	if err != nil {
 		audit.Findings = append(audit.Findings, PlayerCacheFinding{
 			Entry: -1, Reason: playerCacheReasonUnreadable, Detail: "读取失败", Blocking: false,

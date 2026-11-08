@@ -63,15 +63,7 @@ func (a *EulaAudit) Describe() string {
 }
 
 func serHasControlChars(text string) bool {
-	for _, r := range text {
-		if r == '\t' || r == '\n' || r == '\r' {
-			continue
-		}
-		if r < 0x20 || r == 0x7f {
-			return true
-		}
-	}
-	return false
+	return hasControlCharsText(text)
 }
 
 func serParseBool(value string) (bool, bool) {

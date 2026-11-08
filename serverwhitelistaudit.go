@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 )
 
@@ -50,26 +49,11 @@ func (a WhitelistAudit) Blocking() bool {
 }
 
 func (a WhitelistAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != wlReasonOK {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f WhitelistFinding) bool { return !f.Blocking && f.Reason != wlReasonOK })
 }
 
 func (a WhitelistAudit) Codes() []string {
-	seen := map[string]bool{}
-	codes := []string{}
-	for _, f := range a.Findings {
-		if f.Reason == wlReasonOK || seen[f.Reason] {
-			continue
-		}
-		seen[f.Reason] = true
-		codes = append(codes, f.Reason)
-	}
-	sort.Strings(codes)
-	return codes
+	return findingCodesSkip(a.Findings, wlReasonOK, func(f WhitelistFinding) string { return f.Reason })
 }
 
 func (a WhitelistAudit) Describe() string {

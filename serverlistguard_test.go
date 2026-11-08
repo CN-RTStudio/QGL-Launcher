@@ -173,3 +173,53 @@ func TestParseServerAddressLoopbackNames(t *testing.T) {
 		}
 	}
 }
+
+func TestParseServerAddressIPv6Forms(t *testing.T) {
+	var limDefault ServerListLimits
+	lim := limDefault.withDefaults()
+	valid := []struct {
+		raw  string
+		host string
+		port int
+	}{
+		{"::1", "::1", 25565},
+		{"[::1]", "::1", 25565},
+		{"[::1]:25565", "::1", 25565},
+		{"[::1]:30001", "::1", 30001},
+		{"[2001:db8::1]", "2001:db8::1", 25565},
+		{"[2001:db8::1]:25566", "2001:db8::1", 25566},
+		{"2001:db8::1", "2001:db8::1", 25565},
+	}
+	for _, c := range valid {
+		e, err := ParseServerAddress(c.raw, lim)
+		if err != nil {
+			t.Fatalf("valid %q rejected: %v", c.raw, err)
+		}
+		if e.Host != c.host || e.Port != c.port {
+			t.Fatalf("ParseServerAddress(%q) = host=%q port=%d, want host=%q port=%d", c.raw, e.Host, e.Port, c.host, c.port)
+		}
+	}
+	loopback, err := ParseServerAddress("::1", lim)
+	if err != nil {
+		t.Fatalf("valid ::1 rejected: %v", err)
+	}
+	if loopback.Kind != ServerKindLoopback {
+		t.Fatalf("ParseServerAddress(::1) kind = %s, want loopback", loopback.Kind)
+	}
+
+	invalid := []string{
+		"[::1",
+		"[::1]:",
+		"[::1]:0",
+		"[::1]:65536",
+		"[::1]:notaport",
+		"[::1]x",
+		"[]",
+		"[]:25565",
+	}
+	for _, raw := range invalid {
+		if _, err := ParseServerAddress(raw, lim); err == nil {
+			t.Fatalf("invalid %q accepted", raw)
+		}
+	}
+}

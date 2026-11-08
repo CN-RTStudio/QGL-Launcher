@@ -99,7 +99,7 @@ func ParseServerAddress(raw string, lim ServerListLimits) (ServerEntry, error) {
 	if len([]rune(trimmed)) > d.MaxLineRunes {
 		return ServerEntry{}, errors.New("server address too long")
 	}
-	if hasControlCharStr(trimmed) {
+	if hasControlCharStr(raw) {
 		return ServerEntry{}, errors.New("server address contains control characters")
 	}
 	if strings.ContainsAny(trimmed, " \t\"';,<>") {
@@ -118,19 +118,40 @@ func ParseServerAddress(raw string, lim ServerListLimits) (ServerEntry, error) {
 
 	hostPart := trimmed
 	port := 25565
-	if i := strings.LastIndexByte(trimmed, ':'); i >= 0 {
+	if strings.HasPrefix(trimmed, "[") {
+		end := strings.IndexByte(trimmed, ']')
+		if end < 0 {
+			return ServerEntry{}, errors.New("server address has unterminated ipv6 bracket")
+		}
+		hostPart = trimmed[1:end]
+		suffix := trimmed[end+1:]
+		if suffix != "" {
+			if suffix == ":" {
+				return ServerEntry{}, errors.New("server address has empty port")
+			}
+			if !strings.HasPrefix(suffix, ":") {
+				return ServerEntry{}, errors.New("server address has invalid port")
+			}
+			portRaw := suffix[1:]
+			portValue, err := strconv.Atoi(portRaw)
+			if err != nil || portValue < 1 || portValue > d.MaxPort {
+				return ServerEntry{}, errors.New("server address has invalid port")
+			}
+			port = portValue
+		}
+	} else if strings.Count(trimmed, ":") == 1 {
+		i := strings.IndexByte(trimmed, ':')
 		hostPart = trimmed[:i]
 		portRaw := trimmed[i+1:]
 		if portRaw == "" {
 			return ServerEntry{}, errors.New("server address has empty port")
 		}
-		p, err := strconv.Atoi(portRaw)
-		if err != nil || p < 1 || p > d.MaxPort {
+		portValue, err := strconv.Atoi(portRaw)
+		if err != nil || portValue < 1 || portValue > d.MaxPort {
 			return ServerEntry{}, errors.New("server address has invalid port")
 		}
-		port = p
+		port = portValue
 	}
-	hostPart = strings.TrimSuffix(strings.TrimPrefix(hostPart, "["), "]")
 	if hostPart == "" {
 		return ServerEntry{}, errors.New("server address has empty host")
 	}

@@ -46,6 +46,9 @@ func isSymlinkOrSpecial(path string) (bool, error) {
 	if info.Mode()&os.ModeSymlink != 0 {
 		return true, nil
 	}
+	if info.IsDir() {
+		return false, nil
+	}
 	// 命名管道、设备文件、socket 等也不是正常落盘目标。
 	if !info.Mode().IsRegular() {
 		return true, nil

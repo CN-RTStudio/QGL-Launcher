@@ -59,12 +59,7 @@ type AdvancementAudit struct {
 }
 
 func (a AdvancementAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f AdvancementFinding) bool { return f.Blocking })
 }
 
 func (a AdvancementAudit) HasWarnings() bool {
@@ -108,67 +103,11 @@ func (a *AdvancementAudit) add(dir, file, reason, detail string, blocking bool) 
 }
 
 func adJSONDepth(data []byte) int {
-	depth := 0
-	max := 0
-	inString := false
-	escaped := false
-	for _, b := range data {
-		if inString {
-			if escaped {
-				escaped = false
-				continue
-			}
-			if b == '\\' {
-				escaped = true
-				continue
-			}
-			if b == '"' {
-				inString = false
-			}
-			continue
-		}
-		switch b {
-		case '"':
-			inString = true
-		case '{', '[':
-			depth++
-			if depth > max {
-				max = depth
-			}
-		case '}', ']':
-			if depth > 0 {
-				depth--
-			}
-		}
-	}
-	return max
+	return jsonMaxDepth(data)
 }
 
 func adDuplicateKeys(data []byte) []string {
-	dups := []string{}
-	seen := map[string]int{}
-	text := string(data)
-	for {
-		idx := strings.Index(text, "\"")
-		if idx < 0 {
-			break
-		}
-		rest := text[idx+1:]
-		end := strings.Index(rest, "\"")
-		if end < 0 {
-			break
-		}
-		key := rest[:end]
-		after := strings.TrimLeft(rest[end+1:], " \t\r\n")
-		if strings.HasPrefix(after, ":") {
-			seen[key]++
-			if seen[key] == 2 {
-				dups = append(dups, key)
-			}
-		}
-		text = rest[end+1:]
-	}
-	return dups
+	return jsonDuplicateKeys(data)
 }
 
 func adUnsafeResource(value string) bool {

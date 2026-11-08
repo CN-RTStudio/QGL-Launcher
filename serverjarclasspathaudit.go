@@ -52,12 +52,7 @@ type JarClassPathAudit struct {
 }
 
 func (a JarClassPathAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f JarCPFinding) bool { return f.Blocking })
 }
 
 func (a JarClassPathAudit) HasWarnings() bool {

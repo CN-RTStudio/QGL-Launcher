@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -47,12 +46,7 @@ func (a *ServerRconAudit) Blocking() bool {
 	if a == nil {
 		return false
 	}
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f RconFinding) bool { return f.Blocking })
 }
 
 func (a *ServerRconAudit) HasWarnings() bool {
@@ -71,17 +65,7 @@ func (a *ServerRconAudit) Codes() []string {
 	if a == nil {
 		return nil
 	}
-	seen := make(map[string]struct{}, len(a.Findings))
-	codes := make([]string, 0, len(a.Findings))
-	for _, f := range a.Findings {
-		if _, ok := seen[f.Reason]; ok {
-			continue
-		}
-		seen[f.Reason] = struct{}{}
-		codes = append(codes, f.Reason)
-	}
-	sort.Strings(codes)
-	return codes
+	return findingCodes(a.Findings, func(f RconFinding) string { return f.Reason })
 }
 
 func (a *ServerRconAudit) Describe() string {

@@ -73,12 +73,7 @@ func (a StartupSecretAudit) Blocking() bool {
 }
 
 func (a StartupSecretAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != skReasonOK {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f StartupSecretFinding) bool { return !f.Blocking && f.Reason != skReasonOK })
 }
 
 func (a StartupSecretAudit) Describe() string {

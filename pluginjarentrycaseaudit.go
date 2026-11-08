@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -62,26 +61,13 @@ func (a *PjcAudit) HasWarnings() bool {
 }
 
 func (a *PjcAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return fmt.Sprintf("插件条目命名无冲突，%d 个 jar，共 %d 个条目", a.Jars, a.Entries)
-	}
-	sorted := make([]PjcFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Reason != sorted[j].Reason {
-			return sorted[i].Reason < sorted[j].Reason
-		}
-		return sorted[i].Entry < sorted[j].Entry
-	})
-	parts := make([]string, 0, len(sorted))
-	for i, f := range sorted {
-		if i >= 8 {
-			parts = append(parts, fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		parts = append(parts, f.Reason)
-	}
-	return strings.Join(parts, "；")
+	return describeAuditFindings(fmt.Sprintf("插件条目命名无冲突，%d 个 jar，共 %d 个条目", a.Jars, a.Entries), a.Findings, 8,
+		func(f PjcFinding) []string {
+			return []string{f.Reason, f.Entry}
+		},
+		func(f PjcFinding) string {
+			return f.Reason
+		})
 }
 
 func pjcHasCtrlChar(name string) bool {

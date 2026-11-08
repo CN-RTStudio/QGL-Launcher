@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 )
 
@@ -65,26 +64,13 @@ func (a *PlyDataAudit) HasWarnings() bool {
 }
 
 func (a *PlyDataAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return fmt.Sprintf("playerdata 目录通过检查，共 %d 个存档文件", a.Files)
-	}
-	sorted := make([]PlyDataFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Reason != sorted[j].Reason {
-			return sorted[i].Reason < sorted[j].Reason
-		}
-		return sorted[i].File < sorted[j].File
-	})
-	parts := make([]string, 0, len(sorted))
-	for i, f := range sorted {
-		if i >= 8 {
-			parts = append(parts, fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		parts = append(parts, f.Reason)
-	}
-	return strings.Join(parts, "；")
+	return describeAuditFindings(fmt.Sprintf("playerdata 目录通过检查，共 %d 个存档文件", a.Files), a.Findings, 8,
+		func(f PlyDataFinding) []string {
+			return []string{f.Reason, f.File}
+		},
+		func(f PlyDataFinding) string {
+			return f.Reason
+		})
 }
 
 func plaGzipHeader(path string) bool {

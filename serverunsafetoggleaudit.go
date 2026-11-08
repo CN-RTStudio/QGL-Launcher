@@ -44,16 +44,11 @@ func (a *UnsafeToggleAudit) add(file, reason, detail string, blocking bool) {
 }
 
 func (a *UnsafeToggleAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f UnsafeToggleFinding) bool { return f.Blocking })
 }
 
 func (a *UnsafeToggleAudit) HasWarnings() bool {
-	return len(a.Findings) > 0
+	return hasAny(a.Findings)
 }
 
 func (a *UnsafeToggleAudit) Describe() string {

@@ -76,12 +76,7 @@ func (a CommandAliasAudit) Blocking() bool {
 }
 
 func (a CommandAliasAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != caReasonOK {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f CommandAliasFinding) bool { return !f.Blocking && f.Reason != caReasonOK })
 }
 
 func (a CommandAliasAudit) Describe() string {

@@ -45,12 +45,7 @@ func (a LogConfigAudit) Blocking() bool {
 }
 
 func (a LogConfigAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != lgReasonOK {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f LogConfigFinding) bool { return !f.Blocking && f.Reason != lgReasonOK })
 }
 
 func (a LogConfigAudit) Describe() string {

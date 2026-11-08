@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -169,5 +170,56 @@ func TestIsLowerHex(t *testing.T) {
 	// 短哈希绝不能让调用方的 hash[:2] 越界——这里先保证校验本身失败。
 	if IsLowerHex("a", 40) {
 		t.Error("长度 1 的“哈希”必须判非法，防止切片越界 panic")
+	}
+}
+
+func TestPathWithinRootFoldMode(t *testing.T) {
+	root := filepath.Clean("/tmp/qgl-fold/FoldRoot")
+	inside := filepath.Join(root, "sub", "a.jar")
+	folded := strings.ToLower(inside)
+	sibling := filepath.Join(filepath.Dir(root), "FoldRoot2", "a.jar")
+
+	if !pathWithinRootMode(folded, root, true) {
+		t.Errorf("fold 模式必须接受大小写不同的同一路径: %q vs %q", folded, root)
+	}
+	if pathWithinRootMode(folded, root, false) {
+		t.Errorf("非 fold 模式必须保持大小写敏感: %q vs %q", folded, root)
+	}
+	if !pathWithinRootMode(inside, root, true) {
+		t.Errorf("fold 模式下 root 内路径必须通过: %q", inside)
+	}
+	if pathWithinRootMode(sibling, root, true) {
+		t.Errorf("fold 模式不得放行兄弟目录: %q", sibling)
+	}
+	if !pathWithinRootMode(root, strings.ToUpper(root), true) {
+		t.Error("fold 模式下 root 自身大小写不同也必须判为同一路径")
+	}
+	if pathWithinRootMode("a\x00b", "/tmp/game", true) {
+		t.Error("fold 模式仍必须拒绝 NUL 字节路径")
+	}
+}
+
+func TestResolvedPathWithinRootFoldMode(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(root, "bin", "java.exe")
+	foldedMissing := strings.ToLower(missing)
+
+	got, ok := resolvedPathWithinRootMode(missing, root, true)
+	if !ok {
+		t.Fatalf("fold 模式下 root 内尚不存在的目标必须通过: %q", missing)
+	}
+	if got != missing {
+		t.Errorf("返回路径应保留原样: got %q want %q", got, missing)
+	}
+	if _, ok := resolvedPathWithinRootMode(foldedMissing, root, false); ok {
+		t.Errorf("非 fold 模式下大小写不一致的不存在目标必须被拒绝: %q", foldedMissing)
+	}
+
+	escape := filepath.Join(root, "..", "escape.jar")
+	if _, ok := resolvedPathWithinRootMode(escape, root, true); ok {
+		t.Errorf("fold 模式不得放行词法逃逸: %q", escape)
 	}
 }

@@ -2,6 +2,8 @@ package main
 
 import (
 	"archive/zip"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -480,6 +482,10 @@ func (a *App) ensureForgeMappings(installerPath string, mcDir string) {
 		a.writeLog("未找到 mcVersion（跳过 Mappings 检查）")
 		return
 	}
+	if !isValidMCVersion(mcVersion) {
+		a.writeLog("mcVersion 未通过版本格式白名单（跳过 Mappings 检查）: %s", mcVersion)
+		return
+	}
 
 	dataSection, ok := installProfile["data"].(map[string]interface{})
 	if !ok {
@@ -520,11 +526,6 @@ func (a *App) ensureForgeMappings(installerPath string, mcDir string) {
 
 	a.writeLog("目标路径: %s", targetPath)
 
-	if _, err := os.Stat(targetPath); err == nil {
-		a.writeLog("Mappings 文件已存在: %s", targetPath)
-		return
-	}
-
 	versionDir := filepath.Join(mcDir, "versions", mcVersion)
 	jsonPath := filepath.Join(versionDir, mcVersion+".json")
 
@@ -550,6 +551,19 @@ func (a *App) ensureForgeMappings(installerPath string, mcDir string) {
 	if mappingsURL == "" {
 		a.writeLog("未找到 client_mappings URL")
 		return
+	}
+
+	expectedSHA1, _ := clientMappings["sha1"].(string)
+	expectedSHA1 = strings.ToLower(strings.TrimSpace(expectedSHA1))
+
+	if expectedSHA1 != "" {
+		if info, statErr := os.Stat(targetPath); statErr == nil && info.Size() > 0 {
+			if existingSHA1, hashErr := fileSHA1Hex(targetPath); hashErr == nil && existingSHA1 == expectedSHA1 {
+				a.writeLog("Mappings 文件已存在且 SHA1 校验通过: %s", targetPath)
+				return
+			}
+			a.writeLog("Mappings 文件已存在但 SHA1 不符，重新下载: %s", targetPath)
+		}
 	}
 
 	// 安全验证：只允许 HTTPS
@@ -618,6 +632,15 @@ func (a *App) ensureForgeMappings(installerPath string, mcDir string) {
 		return
 	}
 
+	if expectedSHA1 != "" {
+		actualSHA1, hashErr := fileSHA1Hex(targetPath)
+		if hashErr != nil || actualSHA1 != expectedSHA1 {
+			a.writeLog("Mappings SHA1 校验失败（期望 %s，实际 %s），删除半可信文件", expectedSHA1, actualSHA1)
+			os.Remove(targetPath)
+			return
+		}
+	}
+
 	a.writeLog("Mappings 下载成功! 文件大小: %d 字节, 路径: %s", fileInfo.Size(), targetPath)
 }
 
@@ -644,6 +667,11 @@ func (a *App) downloadForgeMappings(mcDir string, mcVersion string, installerPat
 
 	if installProfile == nil {
 		fmt.Printf("未找到 install_profile.json（跳过 Mappings 下载）\n")
+		return
+	}
+
+	if !isValidMCVersion(mcVersion) {
+		fmt.Printf("mcVersion 未通过版本格式白名单（跳过 Mappings 下载）: %s\n", mcVersion)
 		return
 	}
 
@@ -719,6 +747,17 @@ func (a *App) downloadForgeMappings(mcDir string, mcVersion string, installerPat
 		os.Remove(tempPath)
 		fmt.Printf("下载 Mappings 失败: %v\n", err)
 		return
+	}
+
+	expectedSHA1, _ := clientMappings["sha1"].(string)
+	expectedSHA1 = strings.ToLower(strings.TrimSpace(expectedSHA1))
+	if expectedSHA1 != "" {
+		actualSHA1, hashErr := fileSHA1Hex(tempPath)
+		if hashErr != nil || actualSHA1 != expectedSHA1 {
+			fmt.Printf("Mappings SHA1 校验失败（期望 %s，实际 %s），删除下载文件\n", expectedSHA1, actualSHA1)
+			os.Remove(tempPath)
+			return
+		}
 	}
 
 	if err := os.Rename(tempPath, targetPath); err != nil {
@@ -909,4 +948,17 @@ func (a *App) findNewVersionFolder(mcDir string, oldVersions map[string]bool, mc
 	}
 
 	return ""
+}
+
+func fileSHA1Hex(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha1.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }

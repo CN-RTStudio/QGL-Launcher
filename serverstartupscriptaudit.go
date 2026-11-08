@@ -62,12 +62,7 @@ type ServerStartupAudit struct {
 }
 
 func (a *ServerStartupAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f StartupFinding) bool { return f.Blocking })
 }
 
 func (a *ServerStartupAudit) HasWarnings() bool {

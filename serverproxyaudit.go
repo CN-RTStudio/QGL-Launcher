@@ -241,7 +241,7 @@ func readProxyConfig(path string) ([]byte, string) {
 	if info.Size() > proxyMaxConfigBytes {
 		return nil, proxyReasonTooLarge
 	}
-	data, err := os.ReadFile(path)
+	data, err := readBoundedFile(path, auditTextReadMaxBytes)
 	if err != nil {
 		return nil, proxyReasonUnreadable
 	}
@@ -297,7 +297,7 @@ func auditProxySecretFile(audit *ServerProxyAudit, serverDir string) string {
 	if info.Mode().Perm()&0o044 != 0 {
 		audit.Findings = append(audit.Findings, ProxyFinding{File: "forwarding.secret", Reason: proxyReasonSecretPermissive, Detail: "同机其他账户可读该密钥", Blocking: false})
 	}
-	data, err := os.ReadFile(path)
+	data, err := readBoundedFile(path, auditTextReadMaxBytes)
 	if err != nil {
 		audit.Findings = append(audit.Findings, ProxyFinding{File: "forwarding.secret", Reason: proxyReasonUnreadable, Detail: "密钥文件不可读", Blocking: false})
 		return ""

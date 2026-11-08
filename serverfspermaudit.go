@@ -41,12 +41,7 @@ func (a *ServerFSPermAudit) Blocking() bool {
 }
 
 func (a *ServerFSPermAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != fsPermReasonOK && f.Reason != fsPermReasonMissing && f.Reason != fsPermReasonPlatform {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f FSPermFinding) bool { return !f.Blocking && f.Reason != fsPermReasonOK && f.Reason != fsPermReasonMissing && f.Reason != fsPermReasonPlatform })
 }
 
 func (a *ServerFSPermAudit) Codes() []string {

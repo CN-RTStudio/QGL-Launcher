@@ -14,7 +14,6 @@ export namespace main {
 	    optifinePatch: string;
 	    status: string;
 	    progress: number;
-	    currentStep: string;
 	    errorMsg: string;
 	
 	    static createFrom(source: any = {}) {
@@ -36,7 +35,6 @@ export namespace main {
 	        this.optifinePatch = source["optifinePatch"];
 	        this.status = source["status"];
 	        this.progress = source["progress"];
-	        this.currentStep = source["currentStep"];
 	        this.errorMsg = source["errorMsg"];
 	    }
 	}
@@ -91,9 +89,6 @@ export namespace main {
 	    minMemory: number;
 	    minecraftDir: string;
 	    portableMode: boolean;
-	    helperMode: boolean;
-	    helperModeDir: string;
-	    oobe: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new GlobalConfig(source);
@@ -107,61 +102,6 @@ export namespace main {
 	        this.minMemory = source["minMemory"];
 	        this.minecraftDir = source["minecraftDir"];
 	        this.portableMode = source["portableMode"];
-	        this.helperMode = source["helperMode"];
-	        this.helperModeDir = source["helperModeDir"];
-	        this.oobe = source["oobe"];
-	    }
-	}
-	export class GuestPermissions {
-	    allowDownload: boolean;
-	    allowMod: boolean;
-	    allowEasyQGL: boolean;
-	    allowSettings: boolean;
-	    allowQGLPlus: boolean;
-	    allowHelper: boolean;
-	
-	    static createFrom(source: any = {}) {
-	        return new GuestPermissions(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.allowDownload = source["allowDownload"];
-	        this.allowMod = source["allowMod"];
-	        this.allowEasyQGL = source["allowEasyQGL"];
-	        this.allowSettings = source["allowSettings"];
-	        this.allowQGLPlus = source["allowQGLPlus"];
-	        this.allowHelper = source["allowHelper"];
-	    }
-	}
-	export class HelperMinecraftInfo {
-	    path: string;
-	    folderName: string;
-	    launcherNames: string[];
-	
-	    static createFrom(source: any = {}) {
-	        return new HelperMinecraftInfo(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.path = source["path"];
-	        this.folderName = source["folderName"];
-	        this.launcherNames = source["launcherNames"];
-	    }
-	}
-	export class HelperModeState {
-	    active: boolean;
-	    dir: string;
-	
-	    static createFrom(source: any = {}) {
-	        return new HelperModeState(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.active = source["active"];
-	        this.dir = source["dir"];
 	    }
 	}
 	export class InstalledVersionInfo {
@@ -316,22 +256,6 @@ export namespace main {
 	        this.username = source["username"];
 	        this.expiresAt = source["expiresAt"];
 	        this.mcExpiresAt = source["mcExpiresAt"];
-	    }
-	}
-	export class MigrateUserResult {
-	    imported: number;
-	    skipped: number;
-	    names: string[];
-	
-	    static createFrom(source: any = {}) {
-	        return new MigrateUserResult(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.imported = source["imported"];
-	        this.skipped = source["skipped"];
-	        this.names = source["names"];
 	    }
 	}
 	export class ModCategory {
@@ -645,7 +569,6 @@ export namespace main {
 	    themeColor: string;
 	    backgroundImage: string;
 	    showExportLaunchCommand: boolean;
-	    oobe: boolean;
 	
 	    static createFrom(source: any = {}) {
 	        return new UserConfig(source);
@@ -658,17 +581,14 @@ export namespace main {
 	        this.themeColor = source["themeColor"];
 	        this.backgroundImage = source["backgroundImage"];
 	        this.showExportLaunchCommand = source["showExportLaunchCommand"];
-	        this.oobe = source["oobe"];
 	    }
 	}
 	export class UserInfo {
 	    username: string;
-	    dir: string;
 	    hasPassword: boolean;
 	    type: string;
 	    isLocked: boolean;
 	    serverName: string;
-	    serverUrl: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new UserInfo(source);
@@ -677,12 +597,10 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.username = source["username"];
-	        this.dir = source["dir"];
 	        this.hasPassword = source["hasPassword"];
 	        this.type = source["type"];
 	        this.isLocked = source["isLocked"];
 	        this.serverName = source["serverName"];
-	        this.serverUrl = source["serverUrl"];
 	    }
 	}
 	export class YggdrasilServerLinks {

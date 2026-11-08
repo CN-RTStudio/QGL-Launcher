@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -75,17 +74,7 @@ func (a *ServerStartupAudit) HasWarnings() bool {
 }
 
 func (a *ServerStartupAudit) Codes() []string {
-	seen := map[string]bool{}
-	codes := make([]string, 0, len(a.Findings))
-	for _, f := range a.Findings {
-		if seen[f.Reason] {
-			continue
-		}
-		seen[f.Reason] = true
-		codes = append(codes, f.Reason)
-	}
-	sort.Strings(codes)
-	return codes
+	return findingCodes(a.Findings, func(f StartupFinding) string { return f.Reason })
 }
 
 func (a *ServerStartupAudit) Describe() string {

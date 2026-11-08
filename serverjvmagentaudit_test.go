@@ -202,7 +202,7 @@ func TestAuditServerJVMAgentsCommentSkipped(t *testing.T) {
 	}
 }
 
-func TestjaSplitTokens(t *testing.T) {
+func TestJaSplitTokens(t *testing.T) {
 	tokens := jaSplitTokens(`java "-javaagent:a b.jar" -jar x.jar`)
 	if len(tokens) != 3 {
 		t.Fatalf("分词错误: %v", tokens)

@@ -1,14 +1,19 @@
 <script setup>
-import { ref, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
   GetModList, ToggleMod, ImportMod, DeleteMod,
   GetInstalledVersions
 } from '../../wailsjs/go/main/App.js'
+import { showQGLDialog } from '../composables/qglDialog.js'
 
 const emit = defineEmits(['navigate'])
 
 const { t } = useI18n()
+
+function cleanError(e) {
+  return String(e).replace('Error: ', '')
+}
 
 const selectedVersion = ref('')
 const modList = ref([])
@@ -27,7 +32,9 @@ async function loadInstalledVersions() {
     if (installedVersions.value.length > 0 && !selectedVersion.value) {
       selectedVersion.value = installedVersions.value[0].folderName
     }
-  } catch {}
+  } catch (e) {
+    console.error('加载已安装版本列表失败:', e)
+  }
 }
 
 async function loadModList() {
@@ -38,23 +45,21 @@ async function loadModList() {
     const mods = await GetModList(selectedVersion.value)
     modList.value = mods || []
   } catch (e) {
-    error.value = String(e).replace('Error: ', '')
+    error.value = cleanError(e)
     modList.value = []
   } finally {
     loading.value = false
   }
 }
 
-watch(() => selectedVersion.value, () => {
-  loadModList()
-})
+watch(() => selectedVersion.value, () => { loadModList() })
 
 async function handleToggle(mod) {
   try {
     await ToggleMod(mod.filePath, !mod.isEnabled)
     await loadModList()
   } catch (e) {
-    error.value = String(e).replace('Error: ', '')
+    error.value = cleanError(e)
   }
 }
 
@@ -63,17 +68,24 @@ async function handleImport() {
     await ImportMod(selectedVersion.value)
     await loadModList()
   } catch (e) {
-    error.value = String(e).replace('Error: ', '')
+    error.value = cleanError(e)
   }
 }
 
 async function handleDelete(mod) {
-  if (!confirm(t('mod.confirmDelete', { name: mod.fileName }))) return
+  const btnIndex = await showQGLDialog({
+    theme: 'error',
+    title: t('mod.delete'),
+    content: t('mod.confirmDelete', { name: mod.fileName }),
+    btn1Label: t('app.cancel'),
+    btn2Label: t('mod.delete')
+  })
+  if (btnIndex !== 2) return
   try {
     await DeleteMod(mod.filePath)
     await loadModList()
   } catch (e) {
-    error.value = String(e).replace('Error: ', '')
+    error.value = cleanError(e)
   }
 }
 
@@ -83,13 +95,8 @@ function formatSize(bytes) {
   return bytes + ' B'
 }
 
-const enabledCount = ref(0)
-const disabledCount = ref(0)
-
-watch(() => modList.value, () => {
-  enabledCount.value = modList.value.filter(m => m.isEnabled).length
-  disabledCount.value = modList.value.filter(m => !m.isEnabled).length
-}, { immediate: true })
+const enabledCount = computed(() => modList.value.filter(m => m.isEnabled).length)
+const disabledCount = computed(() => modList.value.filter(m => !m.isEnabled).length)
 </script>
 
 <template>
@@ -238,22 +245,24 @@ watch(() => modList.value, () => {
 .mod-top-glass {
   padding: 20px 24px;
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.82);
+  background: var(--glass-bg-heavy);
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
-  border: 1px solid rgba(255, 255, 255, 0.4);
+  border: 1px solid var(--glass-border);
   margin-bottom: 20px;
+  transition: background 0.3s;
 }
 
 .mod-list-glass {
   flex: 1;
   padding: 20px 24px;
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.72);
+  background: var(--glass-bg);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.35);
+  border: 1px solid var(--glass-border);
   overflow-y: auto;
+  transition: background 0.3s;
 }
 
 .version-selector {
@@ -282,7 +291,7 @@ watch(() => modList.value, () => {
   border-radius: 6px;
   font-size: 13px;
   margin-bottom: 16px;
-  border: 1px solid #FFCDD2;
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
 }
 
 .mod-stats {
@@ -310,13 +319,8 @@ watch(() => modList.value, () => {
   border-radius: 50%;
 }
 
-.stat-dot.enabled {
-  background: #4CAF50;
-}
-
-.stat-dot.disabled {
-  background: #9E9E9E;
-}
+.stat-dot.enabled { background: var(--success); }
+.stat-dot.disabled { background: var(--text-light); }
 
 .loading-area {
   display: flex;
@@ -326,7 +330,7 @@ watch(() => modList.value, () => {
   padding: 60px 0;
   color: var(--text-secondary);
   gap: 12px;
-  background: rgba(255, 255, 255, 0.5);
+  background: var(--glass-bg-light);
   border-radius: 10px;
   margin: 20px 0;
 }
@@ -362,12 +366,10 @@ watch(() => modList.value, () => {
 
 .mod-item:hover {
   border-color: var(--primary);
-  box-shadow: 0 2px 8px rgba(0, 188, 212, 0.08);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--primary) 10%, transparent);
 }
 
-.mod-item.disabled {
-  opacity: 0.65;
-}
+.mod-item.disabled { opacity: 0.65; }
 
 .mod-item-left {
   display: flex;
@@ -390,13 +392,8 @@ watch(() => modList.value, () => {
   flex-shrink: 0;
 }
 
-.mod-item-icon.mod-enabled {
-  background: var(--primary);
-}
-
-.mod-item-icon.mod-disabled {
-  background: #BDBDBD;
-}
+.mod-item-icon.mod-enabled { background: var(--primary); }
+.mod-item-icon.mod-disabled { background: var(--text-light); }
 
 .mod-item-info {
   flex: 1;
@@ -418,23 +415,10 @@ watch(() => modList.value, () => {
   margin-top: 4px;
 }
 
-.mod-size {
-  font-size: 12px;
-  color: var(--text-light);
-}
-
-.mod-status {
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.mod-status.enabled {
-  color: #4CAF50;
-}
-
-.mod-status.disabled {
-  color: #9E9E9E;
-}
+.mod-size { font-size: 12px; color: var(--text-light); }
+.mod-status { font-size: 12px; font-weight: 500; }
+.mod-status.enabled { color: var(--success); }
+.mod-status.disabled { color: var(--text-light); }
 
 .mod-item-actions {
   display: flex;
@@ -444,13 +428,13 @@ watch(() => modList.value, () => {
 }
 
 .btn-danger {
-  background: #EF5350;
-  border-color: #EF5350;
+  background: var(--danger);
+  border-color: var(--danger);
   color: white;
 }
 
 .btn-danger:hover {
-  background: #E53935;
+  background: color-mix(in srgb, var(--danger) 80%, black);
 }
 
 .empty-area {
@@ -461,18 +445,12 @@ watch(() => modList.value, () => {
   padding: 48px 0;
   gap: 12px;
   color: var(--text-secondary);
-  background: rgba(255, 255, 255, 0.45);
+  background: var(--glass-bg-light);
   border-radius: 10px;
   margin: 20px 0;
-  border: 1px dashed rgba(200, 200, 200, 0.4);
+  border: 1px dashed var(--border);
 }
 
-.empty-icon {
-  font-size: 48px;
-}
-
-.empty-hint {
-  font-size: 13px;
-  color: var(--text-light);
-}
+.empty-icon { font-size: 48px; }
+.empty-hint { font-size: 13px; color: var(--text-light); }
 </style>

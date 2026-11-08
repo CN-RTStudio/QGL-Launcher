@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"regexp"
-	"sort"
 	"strings"
 )
 
@@ -68,26 +67,13 @@ func (a *PjpAudit) HasWarnings() bool {
 }
 
 func (a *PjpAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return fmt.Sprintf("插件服务声明合法，%d 个 jar，%d 个服务文件，%d 个提供者", a.Jars, a.Services, a.Providers)
-	}
-	sorted := make([]PjpFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Reason != sorted[j].Reason {
-			return sorted[i].Reason < sorted[j].Reason
-		}
-		return sorted[i].Entry < sorted[j].Entry
-	})
-	parts := make([]string, 0, len(sorted))
-	for i, f := range sorted {
-		if i >= 8 {
-			parts = append(parts, fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		parts = append(parts, f.Reason)
-	}
-	return strings.Join(parts, "；")
+	return describeAuditFindings(fmt.Sprintf("插件服务声明合法，%d 个 jar，%d 个服务文件，%d 个提供者", a.Jars, a.Services, a.Providers), a.Findings, 8,
+		func(f PjpFinding) []string {
+			return []string{f.Reason, f.Entry}
+		},
+		func(f PjpFinding) string {
+			return f.Reason
+		})
 }
 
 func pjpClassNameSet(files []*zip.File) map[string]bool {

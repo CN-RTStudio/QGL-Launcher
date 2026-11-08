@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -61,36 +60,16 @@ func (a *PregenAudit) HasWarnings() bool {
 }
 
 func (a *PregenAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return "区块预生成配置未发现风险"
-	}
-	sorted := make([]PregenFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].File != sorted[j].File {
-			return sorted[i].File < sorted[j].File
-		}
-		return sorted[i].Reason < sorted[j].Reason
-	})
-	var b strings.Builder
-	for i, f := range sorted {
-		if i >= 12 {
-			b.WriteString(fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		if i > 0 {
-			b.WriteString("；")
-		}
-		b.WriteString(f.File)
-		b.WriteString(": ")
-		b.WriteString(f.Reason)
-		if f.Detail != "" {
-			b.WriteString("(")
-			b.WriteString(f.Detail)
-			b.WriteString(")")
-		}
-	}
-	return b.String()
+	return describeAuditFindings("区块预生成配置未发现风险", a.Findings, 12,
+		func(f PregenFinding) []string {
+			return []string{f.File, f.Reason}
+		},
+		func(f PregenFinding) string {
+			if f.Detail == "" {
+				return f.File + ": " + f.Reason
+			}
+			return f.File + ": " + f.Reason + "(" + f.Detail + ")"
+		})
 }
 
 func spgLoadText(a *PregenAudit, root, rel string, maxBytes int64) (string, bool) {

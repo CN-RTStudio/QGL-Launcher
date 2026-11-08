@@ -46,12 +46,7 @@ type BackupAudit struct {
 }
 
 func (a BackupAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f BackupFinding) bool { return f.Blocking })
 }
 
 func (a BackupAudit) HasWarnings() bool {

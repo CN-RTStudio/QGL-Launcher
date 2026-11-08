@@ -7,66 +7,38 @@ import {
   GetModDependencies, AddModToDownloadList, SelectModSaveDir,
   GetDefaultModDir, GetModrinthCategories,
   GetForgeVersions, GetFabricVersions, GetNeoForgeVersions, GetOptiFineVersions,
-  CheckLoaderInstalled, InstallForge, InstallFabric, InstallNeoForge, InstallOptiFine,
+  CheckLoaderInstalled,
   GetInstalledVersions, TranslateModName, SearchModsByChineseName,
-  SearchModpacks, GetModpackVersions, AddModpackToDownloadList,
-  SearchMinecraftFolders, EnterHelperMode
+  SearchModpacks, GetModpackVersions, AddModpackToDownloadList
 } from '../../wailsjs/go/main/App.js'
 import { useEasyQGL } from '../stores/easyQGL.js'
 
 const props = defineProps({
-  currentUser: Object,
-  helperMode: { type: Object, default: () => ({ active: false, dir: '' }) },
-  helperSetup: { type: Boolean, default: false }
+  currentUser: Object
 })
 
-const emit = defineEmits(['navigate', 'helper-entered'])
+const emit = defineEmits(['navigate'])
 
 const { t } = useI18n()
 
 const { state: easyQGL, setFirstMod, addSelectedMod } = useEasyQGL()
 
-// ===== 辅助模式（绕过 PCL/HMCL） =====
-const isHelperMode = computed(() => !!props.helperMode?.active)
-const inHelperSetup = computed(() => props.helperSetup && !isHelperMode.value)
-
-// .minecraft 搜索相关
-const mcSearching = ref(false)
-const mcSearched = ref(false)
-const mcSearchResults = ref([])
-const mcManualPath = ref('')
-const mcError = ref('')
-const mcEntering = ref(false)
-
-async function searchMinecraftFolders() {
-  mcSearching.value = true
-  mcError.value = ''
-  try {
-    mcSearchResults.value = await SearchMinecraftFolders() || []
-    mcSearched.value = true
-  } catch (e) {
-    mcError.value = String(e).replace('Error: ', '')
-  } finally {
-    mcSearching.value = false
-  }
+function cleanError(e) {
+  return String(e).replace('Error: ', '')
 }
 
-async function enterHelperByPath(path) {
-  const p = (path || '').trim()
-  if (!p) return
-  mcEntering.value = true
-  mcError.value = ''
-  try {
-    await EnterHelperMode(p)
-    emit('helper-entered')
-  } catch (e) {
-    mcError.value = String(e).replace('Error: ', '')
-  } finally {
-    mcEntering.value = false
-  }
+function recordEasyQGLMod(versionId, versionInfo) {
+  if (!easyQGL.active || !selectedMod.value) return
+  if (!easyQGL.firstMod) setFirstMod(selectedMod.value, versionInfo)
+  addSelectedMod({
+    title: selectedMod.value.title,
+    slug: selectedMod.value.slug,
+    description: selectedMod.value.description,
+    versionId,
+    versionName: versionInfo?.name || versionInfo?.version_number || ''
+  })
 }
 
-// 游戏版本相关
 const versions = ref([])
 const loading = ref(false)
 const error = ref('')
@@ -76,14 +48,11 @@ const filterType = ref('release')
 const adding = ref(false)
 const addSuccess = ref(false)
 
-// Tab 切换 - 直接检查 store 状态决定初始值
 const activeTab = ref(easyQGL.active && easyQGL.mode === 'mod-first' ? 'mod' : 'game')
 
-// Java 下载相关
 const javaList = ref([])
 const installedJavaList = ref([])
 
-// Mod 下载相关
 const modQuery = ref('')
 const modSearchResults = ref([])
 const modSearching = ref(false)
@@ -100,17 +69,15 @@ const modDependencies = ref([])
 const modDepsLoading = ref(false)
 const modSavePath = ref('')
 
-// 模组加载器高级选项
 const showAdvanced = ref(false)
-const loaderTab = ref('forge') // forge, fabric, neoforge, optifine
+const loaderTab = ref('forge')
 const loaderVersions = ref([])
 const loaderLoading = ref(false)
 const loaderInstalling = ref(false)
 const loaderInstalled = ref({})
 const installedGameVersions = ref([])
-const selectedLoader = ref(null) // 选中的加载器版本
+const selectedLoader = ref(null)
 
-// 整合包相关
 const modpackQuery = ref('')
 const modpackSearchResults = ref([])
 const modpackSearching = ref(false)
@@ -128,16 +95,11 @@ onMounted(async () => {
   await loadInstalledVersions()
 })
 
-// 监听 EasyQGL 状态变化，立即响应
 watch(() => easyQGL.active, () => {
   if (easyQGL.active && easyQGL.mode === 'mod-first') {
     activeTab.value = 'mod'
-    if (easyQGL.lockedGameVersion) {
-      modGameVersion.value = easyQGL.lockedGameVersion
-    }
-    if (easyQGL.lockedLoader) {
-      modLoader.value = easyQGL.lockedLoader
-    }
+    if (easyQGL.lockedGameVersion) modGameVersion.value = easyQGL.lockedGameVersion
+    if (easyQGL.lockedLoader) modLoader.value = easyQGL.lockedLoader
   }
 })
 
@@ -147,7 +109,7 @@ async function loadVersions() {
   try {
     versions.value = await GetVersionManifest()
   } catch (e) {
-    error.value = t('download.getVersionsFailed') + String(e).replace('Error: ', '')
+    error.value = t('download.getVersionsFailed') + cleanError(e)
   } finally {
     loading.value = false
   }
@@ -157,19 +119,25 @@ async function loadJavaList() {
   try {
     javaList.value = await GetJavaDownloadList()
     installedJavaList.value = await SearchJava()
-  } catch {}
+  } catch (e) {
+    console.error('加载Java下载列表失败:', e)
+  }
 }
 
 async function loadModCategories() {
   try {
     modCategories.value = await GetModrinthCategories()
-  } catch {}
+  } catch (e) {
+    console.error('加载Mod分类失败:', e)
+  }
 }
 
 async function loadInstalledVersions() {
   try {
     installedGameVersions.value = await GetInstalledVersions()
-  } catch {}
+  } catch (e) {
+    console.error('加载已安装版本失败:', e)
+  }
 }
 
 function selectVersion(ver) {
@@ -202,7 +170,6 @@ async function handleAddToList() {
 
   try {
     if (selectedLoader.value) {
-      // 带加载器，加入列表
       await AddToDownloadListWithLoader(
         selectedVersion.value.id,
         selectedVersion.value.url,
@@ -214,7 +181,6 @@ async function handleAddToList() {
         selectedLoader.value.patch || ''
       )
     } else {
-      // 仅原版，加入列表
       await AddToDownloadList(
         selectedVersion.value.id,
         selectedVersion.value.url,
@@ -223,11 +189,9 @@ async function handleAddToList() {
       )
     }
     addSuccess.value = true
-    setTimeout(() => {
-      backToList()
-    }, 1200)
+    setTimeout(() => { backToList() }, 1200)
   } catch (e) {
-    error.value = String(e).replace('Error: ', '')
+    error.value = cleanError(e)
   } finally {
     adding.value = false
   }
@@ -242,15 +206,9 @@ function updateFilter() {
   }
 }
 
-watch(() => versions.value, () => {
-  updateFilter()
-}, { immediate: true })
+watch(() => versions.value, () => { updateFilter() }, { immediate: true })
+watch(() => filterType.value, () => { updateFilter() })
 
-watch(() => filterType.value, () => {
-  updateFilter()
-})
-
-// Java 下载
 function isJavaInstalled(majorVer) {
   return installedJavaList.value.some(j => j.majorVer === majorVer)
 }
@@ -264,29 +222,24 @@ async function handleDownloadJava(majorVer) {
   try {
     await AddJavaToDownloadList(majorVer)
   } catch (e) {
-    error.value = String(e).replace('Error: ', '')
+    error.value = cleanError(e)
   }
 }
 
-// ===== Mod 搜索 =====
 async function searchMods(page = 0) {
   modSearching.value = true
   modSearchPage.value = page
   error.value = ''
   try {
-    // 支持中文搜索：检测是否包含中文字符
     const query = modQuery.value.trim()
     const isChineseQuery = /[\u4e00-\u9fa5]/.test(query)
 
     let result
     if (isChineseQuery && query) {
-      // 中文搜索：先通过翻译表查找对应的英文 slug，再用英文搜索
       const englishSlugs = await SearchModsByChineseName(query)
       if (englishSlugs && englishSlugs.length > 0) {
-        // 用找到的第一个英文 slug 搜索
         result = await SearchMods(englishSlugs[0], modGameVersion.value, modLoader.value, modCategory.value, page, 20)
       } else {
-        // 翻译表没找到，回退到原始关键词搜索（可能Modrinth也收录了中文名）
         result = await SearchMods(query, modGameVersion.value, modLoader.value, modCategory.value, page, 20)
       }
     } else {
@@ -301,14 +254,11 @@ async function searchMods(page = 0) {
       modSearchTotal.value = 0
     }
 
-    // 批量预加载中文翻译
     if (modSearchResults.value.length > 0) {
-      for (const m of modSearchResults.value) {
-        getModChineseNameCached(m)
-      }
+      for (const m of modSearchResults.value) getModChineseNameCached(m)
     }
   } catch (e) {
-    error.value = String(e).replace('Error: ', '')
+    error.value = cleanError(e)
     modSearchResults.value = []
     modSearchTotal.value = 0
   } finally {
@@ -316,28 +266,24 @@ async function searchMods(page = 0) {
   }
 }
 
-// 获取 Mod 的中文翻译名称
 async function getModChineseName(mod) {
-  // 优先使用 slug（通常是英文标识符），其次用 title
   const key = mod.slug || mod.title || ''
   if (!key) return ''
   try {
     const chinese = await TranslateModName(key)
     return chinese && chinese !== key ? chinese : ''
-  } catch {
+  } catch (e) {
+    console.error('翻译Mod名称失败:', e)
     return ''
   }
 }
 
-// 缓存翻译结果避免重复调用
 const modTranslationCache = ref({})
 
 async function getModChineseNameCached(mod) {
   const key = mod.slug || mod.project_id || ''
   if (!key) return ''
-  if (modTranslationCache.value[key] !== undefined) {
-    return modTranslationCache.value[key]
-  }
+  if (modTranslationCache.value[key] !== undefined) return modTranslationCache.value[key]
   const result = await getModChineseName(mod)
   modTranslationCache.value[key] = result
   return result
@@ -359,12 +305,12 @@ async function selectMod(mod) {
     modVersionsLoading.value = false
   }
 
-  // 加载依赖信息
   if (modVersions.value && modVersions.value.length > 0) {
     try {
       const deps = await GetModDependencies(modVersions.value[0].id)
       modDependencies.value = deps || []
-    } catch {
+    } catch (e) {
+      console.error('加载Mod依赖失败:', e)
       modDependencies.value = []
     } finally {
       modDepsLoading.value = false
@@ -382,26 +328,12 @@ function backToModList() {
 
 async function handleAddModToDownloadList(versionId) {
   try {
-    // 弹出选择保存位置对话框
     const dir = await SelectModSaveDir()
-    if (!dir) return // 用户取消
-
+    if (!dir) return
     await AddModToDownloadList(versionId, dir)
-
-    // EasyQGL 模式：记录模组到状态
-    if (easyQGL.active && selectedMod.value) {
-      if (!easyQGL.firstMod) {
-        setFirstMod(selectedMod.value)
-      }
-      addSelectedMod({
-        title: selectedMod.value.title,
-        slug: selectedMod.value.slug,
-        description: selectedMod.value.description,
-        versionId: versionId
-      })
-    }
+    recordEasyQGLMod(versionId)
   } catch (e) {
-    error.value = String(e).replace('Error: ', '')
+    error.value = cleanError(e)
   }
 }
 
@@ -409,56 +341,24 @@ async function handleAddModToDefaultDir(versionId) {
   try {
     const dir = modSavePath.value || await GetDefaultModDir(modGameVersion.value)
     await AddModToDownloadList(versionId, dir)
-
-    // EasyQGL 模式：记录模组到状态
-    if (easyQGL.active && selectedMod.value) {
-      if (!easyQGL.firstMod) {
-        setFirstMod(selectedMod.value)
-      }
-      addSelectedMod({
-        title: selectedMod.value.title,
-        slug: selectedMod.value.slug,
-        description: selectedMod.value.description,
-        versionId: versionId
-      })
-    }
+    recordEasyQGLMod(versionId)
   } catch (e) {
-    error.value = String(e).replace('Error: ', '')
+    error.value = cleanError(e)
   }
 }
 
-// EasyQGL 模式：加入下载列表（不弹选择位置对话框）
 async function handleAddModToEasyList(versionId, versionInfo) {
   try {
-    // EasyQGL 模式：只记录到状态，不加入后端下载列表
-    // 安装时由 EasyQGLPage 统一控制添加
-    if (selectedMod.value) {
-      if (!easyQGL.firstMod) {
-        setFirstMod(selectedMod.value, versionInfo)
-      }
-      addSelectedMod({
-        title: selectedMod.value.title,
-        slug: selectedMod.value.slug,
-        description: selectedMod.value.description,
-        versionId: versionId,
-        versionName: versionInfo?.name || versionInfo?.version_number || ''
-      })
-    }
+    recordEasyQGLMod(versionId, versionInfo)
 
-    // 锁定筛选器：使用第一个模组的版本和加载器
-    if (easyQGL.lockedGameVersion) {
-      modGameVersion.value = easyQGL.lockedGameVersion
-    }
-    if (easyQGL.lockedLoader) {
-      modLoader.value = easyQGL.lockedLoader
-    }
+    if (easyQGL.lockedGameVersion) modGameVersion.value = easyQGL.lockedGameVersion
+    if (easyQGL.lockedLoader) modLoader.value = easyQGL.lockedLoader
 
-    // 关闭模组详情面板，返回 mod 列表
     selectedMod.value = null
     modVersions.value = []
     modDependencies.value = []
   } catch (e) {
-    error.value = String(e).replace('Error: ', '')
+    error.value = cleanError(e)
   }
 }
 
@@ -468,7 +368,6 @@ function formatDownloads(num) {
   return String(num)
 }
 
-// ===== 整合包 =====
 const modpackTotalPages = computed(() => Math.ceil(modpackSearchTotal.value / 20))
 
 async function searchModpacks(page) {
@@ -480,7 +379,7 @@ async function searchModpacks(page) {
     modpackSearchResults.value = result.hits || []
     modpackSearchTotal.value = result.total_hits || 0
   } catch (e) {
-    error.value = String(e).replace('Error: ', '')
+    error.value = cleanError(e)
     modpackSearchResults.value = []
   } finally {
     modpackSearching.value = false
@@ -495,7 +394,7 @@ async function selectModpack(mod) {
   try {
     modpackVersions.value = await GetModpackVersions(mod.project_id)
   } catch (e) {
-    error.value = String(e).replace('Error: ', '')
+    error.value = cleanError(e)
   } finally {
     modpackVersionsLoading.value = false
   }
@@ -507,22 +406,20 @@ function backToModpackList() {
   error.value = ''
 }
 
-async function handleAddModpackToDownloadList(versionId, versionInfo) {
+async function handleAddModpackToDownloadList(versionId) {
   try {
     const name = selectedModpack.value?.title || ''
     await AddModpackToDownloadList(versionId, name)
   } catch (e) {
-    error.value = String(e).replace('Error: ', '')
+    error.value = cleanError(e)
   }
 }
 
-// ===== 模组加载器 =====
 async function loadLoaderVersions() {
   loaderLoading.value = true
   loaderVersions.value = []
   error.value = ''
   try {
-    // 使用当前选择的游戏版本
     const mcVer = selectedVersion.value?.id || ''
     if (!mcVer) {
       error.value = t('download.selectVersionFirst')
@@ -532,31 +429,24 @@ async function loadLoaderVersions() {
 
     let versions = []
     switch (loaderTab.value) {
-      case 'forge':
-        versions = await GetForgeVersions(mcVer)
-        break
-      case 'fabric':
-        versions = await GetFabricVersions(mcVer)
-        break
-      case 'neoforge':
-        versions = await GetNeoForgeVersions(mcVer)
-        break
-      case 'optifine':
-        versions = await GetOptiFineVersions(mcVer)
-        break
+      case 'forge': versions = await GetForgeVersions(mcVer); break
+      case 'fabric': versions = await GetFabricVersions(mcVer); break
+      case 'neoforge': versions = await GetNeoForgeVersions(mcVer); break
+      case 'optifine': versions = await GetOptiFineVersions(mcVer); break
     }
     loaderVersions.value = versions || []
 
-    // 检查安装状态
-    for (let i = 0; i < loaderVersions.value.length; i++) {
-      try {
-        loaderVersions.value[i].isInstalled = await CheckLoaderInstalled(mcVer, loaderTab.value)
-      } catch {
-        loaderVersions.value[i].isInstalled = false
-      }
+    // CheckLoaderInstalled 只依赖 (mcVer, loaderTab)，与具体版本号无关，查一次即可
+    let installed = false
+    try {
+      installed = await CheckLoaderInstalled(mcVer, loaderTab.value)
+    } catch (e) {
+      console.error('检查加载器安装状态失败:', e)
+      installed = false
     }
+    loaderVersions.value.forEach(v => { v.isInstalled = installed })
   } catch (e) {
-    error.value = String(e).replace('Error: ', '')
+    error.value = cleanError(e)
     loaderVersions.value = []
   } finally {
     loaderLoading.value = false
@@ -564,7 +454,6 @@ async function loadLoaderVersions() {
 }
 
 function selectLoader(loader) {
-  // 如果已经选中同一个，取消选择
   if (selectedLoader.value && selectedLoader.value.name === loader.name && selectedLoader.value.version === loader.version) {
     selectedLoader.value = null
   } else {
@@ -581,98 +470,26 @@ function clearLoaderSelection() {
 }
 
 watch(() => loaderTab.value, () => {
-  if (showAdvanced.value) {
-    loadLoaderVersions()
-  }
+  if (showAdvanced.value) loadLoaderVersions()
 })
 
 watch(() => showAdvanced.value, (val) => {
-  if (val && loaderVersions.value.length === 0) {
-    loadLoaderVersions()
-  }
+  if (val && loaderVersions.value.length === 0) loadLoaderVersions()
 })
 
 const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
 </script>
 
 <template>
-  <!-- 辅助模式设置页：搜索 .minecraft 文件夹 -->
-  <div v-if="inHelperSetup" class="download-page helper-page">
-    <div class="top-bar">
-      <button class="btn btn-outline" @click="emit('navigate', 'main')">
-        &#x2190; {{ t('download.backToMain') }}
-      </button>
-      <h2 class="page-title">{{ t('download.helperSetupTitle') }}</h2>
-      <div class="helper-mode-badge">{{ t('app.helperModeBadge') }}</div>
-    </div>
-
-    <div class="content-area">
-      <div class="glass-container helper-setup-container">
-        <p class="helper-setup-desc">{{ t('download.helperSetupDesc') }}</p>
-
-        <div v-if="mcError" class="error-msg">{{ mcError }}</div>
-
-        <!-- 搜索按钮 -->
-        <button class="btn btn-primary helper-search-btn" :disabled="mcSearching" @click="searchMinecraftFolders">
-          {{ mcSearching ? t('download.helperSearching') : t('download.helperStartSearch') }}
-        </button>
-
-        <!-- 搜索中 -->
-        <div v-if="mcSearching" class="loading-area">
-          <div class="spin" style="font-size: 32px;">&#x2697;</div>
-          <p>{{ t('download.helperSearching') }}</p>
-        </div>
-
-        <!-- 搜索结果列表 -->
-        <div v-else-if="mcSearchResults.length > 0" class="mc-folder-list">
-          <div v-for="mc in mcSearchResults" :key="mc.path" class="mc-folder-item">
-            <div class="mc-folder-info">
-              <div class="mc-folder-title">
-                {{ mc.folderName }}
-                <span v-for="tag in (mc.launcherNames || [])" :key="tag" class="mc-launcher-tag" :class="'mc-tag-' + tag.toLowerCase()">{{ tag }}</span>
-              </div>
-              <div class="mc-folder-path">{{ mc.path }}</div>
-            </div>
-            <button class="btn btn-primary btn-sm" :disabled="mcEntering" @click="enterHelperByPath(mc.path)">
-              {{ t('download.helperChoose') }}
-            </button>
-          </div>
-        </div>
-
-        <!-- 搜索完成但无结果 -->
-        <div v-else-if="mcSearched" class="empty-area">
-          <p>{{ t('download.helperNoResults') }}</p>
-        </div>
-
-        <!-- 手动输入路径 -->
-        <div class="mc-manual-row">
-          <input
-            v-model="mcManualPath"
-            class="input"
-            :placeholder="t('download.helperManualPlaceholder')"
-            @keyup.enter="enterHelperByPath(mcManualPath)"
-          />
-          <button class="btn btn-primary" :disabled="mcEntering || !mcManualPath.trim()" @click="enterHelperByPath(mcManualPath)">
-            {{ t('download.helperConfirm') }}
-          </button>
-        </div>
-      </div>
-    </div>
-  </div>
-
-  <!-- 正常下载页 -->
-  <div v-else class="download-page" :class="{ 'helper-mode': isHelperMode }">
-    <!-- 顶部导航栏 -->
+  <div class="download-page">
     <div class="top-bar">
       <button class="btn btn-outline" @click="easyQGL.active ? emit('navigate', 'easyqgl') : emit('navigate', 'main')">
         &#x2190; {{ easyQGL.active ? t('download.backToEasyQGL') : t('download.backToMain') }}
       </button>
       <h2 class="page-title">{{ t('download.title') }}</h2>
       <div v-if="easyQGL.active" class="easy-mode-badge">{{ t('download.easyMode') }}</div>
-      <div v-if="isHelperMode" class="helper-mode-badge">{{ t('app.helperModeBadge') }}</div>
     </div>
 
-    <!-- Tab 切换 -->
     <div v-if="!easyQGL.active" class="tab-bar">
       <button class="tab-btn" :class="{ active: activeTab === 'game' }" @click="activeTab = 'game'">{{ t('download.gameVersion') }}</button>
       <button class="tab-btn" :class="{ active: activeTab === 'mod' }" @click="activeTab = 'mod'">{{ t('download.mod') }}</button>
@@ -680,12 +497,10 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
       <button class="tab-btn" :class="{ active: activeTab === 'java' }" @click="activeTab = 'java'">{{ t('download.javaRuntime') }}</button>
     </div>
 
-    <!-- 游戏版本下载 -->
     <div v-if="activeTab === 'game'" class="content-area">
       <div class="glass-container">
       <div v-if="error && activeTab === 'game'" class="error-msg">{{ error }}</div>
 
-      <!-- 版本选择界面 -->
       <div v-if="!selectedVersion">
         <div v-if="loading" class="loading-area">
           <div class="spin" style="font-size: 32px;">&#x2697;</div>
@@ -694,30 +509,13 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
 
         <div v-else-if="versions.length > 0">
           <div class="filter-bar">
-            <button
-              class="filter-btn"
-              :class="{ active: filterType === 'release' }"
-              @click="filterType = 'release'"
-            >{{ t('download.release') }}</button>
-            <button
-              class="filter-btn"
-              :class="{ active: filterType === 'snapshot' }"
-              @click="filterType = 'snapshot'"
-            >{{ t('download.snapshot') }}</button>
-            <button
-              class="filter-btn"
-              :class="{ active: filterType === 'all' }"
-              @click="filterType = 'all'"
-            >{{ t('download.all') }}</button>
+            <button class="filter-btn" :class="{ active: filterType === 'release' }" @click="filterType = 'release'">{{ t('download.release') }}</button>
+            <button class="filter-btn" :class="{ active: filterType === 'snapshot' }" @click="filterType = 'snapshot'">{{ t('download.snapshot') }}</button>
+            <button class="filter-btn" :class="{ active: filterType === 'all' }" @click="filterType = 'all'">{{ t('download.all') }}</button>
           </div>
 
           <div class="version-grid">
-            <div
-              v-for="ver in filteredVersions"
-              :key="ver.id"
-              class="version-card"
-              @click="selectVersion(ver)"
-            >
+            <div v-for="ver in filteredVersions" :key="ver.id" class="version-card" @click="selectVersion(ver)">
               <div class="version-id">{{ ver.id }}</div>
               <div class="version-type-badge" :class="ver.type">
                 {{ ver.type === 'release' ? t('download.release') : t('download.snapshot') }}
@@ -733,7 +531,6 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
         </div>
       </div>
 
-      <!-- 版本详情界面 -->
       <div v-else>
         <button class="back-link" @click="backToList">&#x2190; {{ t('download.backToVersionList') }}</button>
 
@@ -747,15 +544,9 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
 
           <div class="form-group">
             <label>{{ t('download.gameName') }}</label>
-            <input
-              v-model="customName"
-              class="input"
-              :placeholder="t('download.enterGameName')"
-              :disabled="adding"
-            />
+            <input v-model="customName" class="input" :placeholder="t('download.enterGameName')" :disabled="adding" />
           </div>
 
-          <!-- 高级选项：模组加载器 -->
           <div class="advanced-section">
             <button class="advanced-toggle" @click="showAdvanced = !showAdvanced">
               {{ showAdvanced ? t('download.collapseAdvanced') : t('download.advancedOptions') }}
@@ -783,13 +574,7 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
               </div>
 
               <div v-else-if="loaderVersions.length > 0" class="loader-list">
-                <div
-                  v-for="lv in loaderVersions"
-                  :key="lv.version"
-                  class="loader-item"
-                  :class="{ selected: isSelectedLoader(lv) }"
-                  @click="selectLoader(lv)"
-                >
+                <div v-for="lv in loaderVersions" :key="lv.version" class="loader-item" :class="{ selected: isSelectedLoader(lv) }" @click="selectLoader(lv)">
                   <div class="loader-item-info">
                     <div class="loader-item-version">{{ lv.version }}</div>
                     <div class="loader-item-meta">
@@ -798,10 +583,7 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
                     </div>
                   </div>
                   <div class="loader-item-actions">
-                    <button
-                      class="btn btn-sm"
-                      :class="isSelectedLoader(lv) ? 'btn-primary' : 'btn-outline'"
-                    >
+                    <button class="btn btn-sm" :class="isSelectedLoader(lv) ? 'btn-primary' : 'btn-outline'">
                       {{ isSelectedLoader(lv) ? t('download.selectedTag') : t('download.selectTag') }}
                     </button>
                   </div>
@@ -821,11 +603,7 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
 
           <div v-if="error && activeTab === 'game'" class="error-msg">{{ error }}</div>
 
-          <button
-            class="btn btn-primary btn-large"
-            :disabled="adding || !customName.trim()"
-            @click="handleAddToList"
-          >
+          <button class="btn btn-primary btn-large" :disabled="adding || !customName.trim()" @click="handleAddToList">
             {{ adding
               ? t('download.adding')
               : (selectedLoader
@@ -838,42 +616,25 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
       </div>
     </div>
 
-    <!-- MOD 下载 -->
     <div v-if="activeTab === 'mod'" class="content-area">
       <div class="glass-container">
       <div v-if="error && activeTab === 'mod'" class="error-msg">{{ error }}</div>
 
-      <!-- Mod 搜索界面 -->
       <div v-if="!selectedMod">
         <div class="mod-search-bar">
-          <input
-            v-model="modQuery"
-            class="input mod-search-input"
-            :placeholder="t('download.modSearchPlaceholder')"
-            @keyup.enter="searchMods(0)"
-          />
+          <input v-model="modQuery" class="input mod-search-input" placeholder="搜索 Mod（支持中文/英文，从 Modrinth）..." @keyup.enter="searchMods(0)" />
           <button class="btn btn-primary" :disabled="modSearching" @click="searchMods(0)">
             {{ modSearching ? t('download.searching') : t('download.search') }}
           </button>
         </div>
 
         <div class="mod-filters">
-          <select
-            v-model="modGameVersion"
-            class="input mod-filter-select"
-            :disabled="easyQGL.active && easyQGL.lockedGameVersion"
-            @change="searchMods(0)"
-          >
-            <option value="">{{ t('download.allVersions') }}</option>
+          <select v-model="modGameVersion" class="input mod-filter-select" :disabled="easyQGL.active && easyQGL.lockedGameVersion" @change="searchMods(0)">
+            <option value="">全部版本</option>
             <option v-for="v in installedGameVersions" :key="v.folderName" :value="v.version">{{ v.version }}</option>
             <option v-for="v in versions.slice(0, 30)" :key="v.id" :value="v.id">{{ v.id }}</option>
           </select>
-          <select
-            v-model="modLoader"
-            class="input mod-filter-select"
-            :disabled="easyQGL.active && easyQGL.lockedLoader"
-            @change="searchMods(0)"
-          >
+          <select v-model="modLoader" class="input mod-filter-select" :disabled="easyQGL.active && easyQGL.lockedLoader" @change="searchMods(0)">
             <option value="">{{ t('download.allLoaders') }}</option>
             <option value="forge">Forge</option>
             <option value="fabric">Fabric</option>
@@ -893,12 +654,7 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
         <div v-else-if="modSearchResults.length > 0">
           <div class="mod-result-count">{{ t('download.modSearchResults', { total: modSearchTotal }) }}</div>
           <div class="mod-grid">
-            <div
-              v-for="mod in modSearchResults"
-              :key="mod.project_id"
-              class="mod-card"
-              @click="selectMod(mod)"
-            >
+            <div v-for="mod in modSearchResults" :key="mod.project_id" class="mod-card" @click="selectMod(mod)">
               <div class="mod-card-icon">
                 <img v-if="mod.icon_url" :src="mod.icon_url" alt="" />
                 <span v-else class="mod-icon-placeholder">{{ mod.title?.[0] || '?' }}</span>
@@ -917,7 +673,6 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
             </div>
           </div>
 
-          <!-- 分页 -->
           <div v-if="totalPages > 1" class="pagination">
             <button class="btn btn-outline btn-sm" :disabled="modSearchPage <= 0" @click="searchMods(modSearchPage - 1)">{{ t('download.pagePrev') }}</button>
             <span class="page-info">{{ modSearchPage + 1 }} / {{ totalPages }}</span>
@@ -934,7 +689,6 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
         </div>
       </div>
 
-      <!-- Mod 详情界面 -->
       <div v-else>
         <button class="back-link" @click="backToModList">&#x2190; {{ t('download.backToModList') }}</button>
 
@@ -955,7 +709,6 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
 
           <p class="mod-detail-desc">{{ selectedMod.description }}</p>
 
-          <!-- 依赖信息 -->
           <div v-if="modDependencies.length > 0" class="mod-deps-section">
             <h3>{{ t('download.dependencies') }}</h3>
             <div class="mod-deps-list">
@@ -974,7 +727,6 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
             </div>
           </div>
 
-          <!-- 版本列表 -->
           <h3>{{ t('download.versions') }}</h3>
           <div v-if="modVersionsLoading" class="loading-area" style="padding: 20px 0;">
             <div class="spin">&#x2697;</div>
@@ -1014,31 +766,20 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
       </div>
     </div>
 
-    <!-- 整合包下载 -->
     <div v-if="activeTab === 'modpack'" class="content-area">
       <div class="glass-container">
       <div v-if="error && activeTab === 'modpack'" class="error-msg">{{ error }}</div>
 
-      <!-- 整合包搜索界面 -->
       <div v-if="!selectedModpack">
         <div class="mod-search-bar">
-          <input
-            v-model="modpackQuery"
-            class="input mod-search-input"
-            :placeholder="t('download.modpackSearchPlaceholder')"
-            @keyup.enter="searchModpacks(0)"
-          />
+          <input v-model="modpackQuery" class="input mod-search-input" :placeholder="t('download.modpackSearchPlaceholder')" @keyup.enter="searchModpacks(0)" />
           <button class="btn btn-primary" :disabled="modpackSearching" @click="searchModpacks(0)">
             {{ modpackSearching ? t('download.searching') : t('download.search') }}
           </button>
         </div>
 
         <div class="mod-filters">
-          <select
-            v-model="modpackGameVersion"
-            class="input mod-filter-select"
-            @change="searchModpacks(0)"
-          >
+          <select v-model="modpackGameVersion" class="input mod-filter-select" @change="searchModpacks(0)">
             <option value="">{{ t('download.allVersions') }}</option>
             <option v-for="v in installedGameVersions" :key="v.folderName" :value="v.version">{{ v.version }}</option>
             <option v-for="v in versions.slice(0, 30)" :key="v.id" :value="v.id">{{ v.id }}</option>
@@ -1053,12 +794,7 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
         <div v-else-if="modpackSearchResults.length > 0">
           <div class="mod-result-count">{{ t('download.modSearchResults', { total: modpackSearchTotal }) }}</div>
           <div class="mod-grid">
-            <div
-              v-for="mod in modpackSearchResults"
-              :key="mod.project_id"
-              class="mod-card"
-              @click="selectModpack(mod)"
-            >
+            <div v-for="mod in modpackSearchResults" :key="mod.project_id" class="mod-card" @click="selectModpack(mod)">
               <div class="mod-card-icon">
                 <img v-if="mod.icon_url" :src="mod.icon_url" alt="" />
                 <span v-else class="mod-icon-placeholder">{{ mod.title?.[0] || '?' }}</span>
@@ -1074,7 +810,6 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
             </div>
           </div>
 
-          <!-- 分页 -->
           <div v-if="modpackTotalPages > 1" class="pagination">
             <button class="btn btn-outline btn-sm" :disabled="modpackSearchPage <= 0" @click="searchModpacks(modpackSearchPage - 1)">{{ t('download.pagePrev') }}</button>
             <span class="page-info">{{ modpackSearchPage + 1 }} / {{ modpackTotalPages }}</span>
@@ -1091,7 +826,6 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
         </div>
       </div>
 
-      <!-- 整合包详情界面 -->
       <div v-else>
         <button class="back-link" @click="backToModpackList">&#x2190; {{ t('download.backToModpackList') }}</button>
 
@@ -1111,7 +845,6 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
 
           <p class="mod-detail-desc">{{ selectedModpack.description }}</p>
 
-          <!-- 版本列表 -->
           <h3>{{ t('download.versions') }}</h3>
           <div v-if="modpackVersionsLoading" class="loading-area" style="padding: 20px 0;">
             <div class="spin">&#x2697;</div>
@@ -1141,7 +874,6 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
       </div>
     </div>
 
-    <!-- Java 下载 -->
     <div v-if="activeTab === 'java'" class="content-area">
       <div class="glass-container">
       <div v-if="error && activeTab === 'java'" class="error-msg">{{ error }}</div>
@@ -1150,11 +882,7 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
         <div class="java-hint">{{ t('download.javaHint') }}</div>
 
         <div class="java-download-list">
-          <div
-            v-for="j in javaList"
-            :key="j.majorVer"
-            class="java-download-card"
-          >
+          <div v-for="j in javaList" :key="j.majorVer" class="java-download-card">
             <div class="java-card-left">
               <div class="java-card-icon" :class="'java-icon-' + j.majorVer">{{ j.majorVer }}</div>
               <div class="java-card-info">
@@ -1172,11 +900,7 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
             </div>
 
             <div class="java-card-right">
-              <button
-                class="btn btn-primary btn-sm"
-                :disabled="isJavaInstalled(j.majorVer)"
-                @click="handleDownloadJava(j.majorVer)"
-              >
+              <button class="btn btn-primary btn-sm" :disabled="isJavaInstalled(j.majorVer)" @click="handleDownloadJava(j.majorVer)">
                 <template v-if="isJavaInstalled(j.majorVer)">{{ t('download.installed') }}</template>
                 <template v-else>{{ t('download.downloadJava') }}</template>
               </button>
@@ -1221,7 +945,7 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
 .easy-mode-badge {
   margin-left: auto;
   padding: 4px 12px;
-  background: #FF9800;
+  background: var(--easy-orange, #FF9800);
   color: white;
   border-radius: 6px;
   font-size: 12px;
@@ -1229,23 +953,22 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
 }
 
 .btn-easy-orange {
-  background: #FF9800;
-  border-color: #FF9800;
+  background: var(--easy-orange, #FF9800);
+  border-color: var(--easy-orange, #FF9800);
   color: white;
 }
 
 .btn-easy-orange:hover {
-  background: #F57C00;
-  border-color: #F57C00;
+  background: var(--easy-orange-dark, #F57C00);
+  border-color: var(--easy-orange-dark, #F57C00);
 }
 
-/* Tab 切换 */
 .tab-bar {
   display: flex;
   gap: 0;
   padding: 0 24px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.35);
-  background: rgba(255, 255, 255, 0.85);
+  border-bottom: 1px solid var(--border);
+  background: var(--glass-bg-heavy);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
 }
@@ -1262,9 +985,7 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
   transition: all 0.15s;
 }
 
-.tab-btn:hover {
-  color: var(--primary);
-}
+.tab-btn:hover { color: var(--primary); }
 
 .tab-btn.active {
   color: var(--primary);
@@ -1279,11 +1000,11 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
 }
 
 .glass-container {
-  background: rgba(255, 255, 255, 0.75);
+  background: var(--glass-bg);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border-radius: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.35);
+  border: 1px solid var(--glass-border);
   padding: 20px;
 }
 
@@ -1295,11 +1016,11 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
   padding: 60px 0;
   color: var(--text-secondary);
   gap: 12px;
-  background: rgba(255, 255, 255, 0.45);
+  background: var(--glass-bg-light);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.25);
+  border: 1px solid var(--glass-border);
 }
 
 .spin {
@@ -1313,7 +1034,7 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
 }
 
 .error-msg {
-  background: rgba(255, 235, 238, 0.85);
+  background: color-mix(in srgb, var(--danger) 10%, var(--glass-bg-heavy));
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   color: var(--danger);
@@ -1321,11 +1042,11 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
   border-radius: 8px;
   font-size: 13px;
   margin-bottom: 16px;
-  border: 1px solid rgba(244, 67, 54, 0.2);
+  border: 1px solid color-mix(in srgb, var(--danger) 25%, transparent);
 }
 
 .success-msg {
-  background: rgba(232, 245, 233, 0.85);
+  background: color-mix(in srgb, var(--success) 10%, var(--glass-bg-heavy));
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   color: var(--success);
@@ -1333,7 +1054,7 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
   border-radius: 8px;
   font-size: 13px;
   margin-bottom: 16px;
-  border: 1px solid rgba(76, 175, 80, 0.2);
+  border: 1px solid color-mix(in srgb, var(--success) 25%, transparent);
 }
 
 .filter-bar {
@@ -1385,7 +1106,7 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
 
 .version-card:hover {
   border-color: var(--primary);
-  box-shadow: 0 2px 12px rgba(0, 188, 212, 0.1);
+  box-shadow: 0 2px 12px color-mix(in srgb, var(--primary) 15%, transparent);
 }
 
 .version-id {
@@ -1404,13 +1125,13 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
 }
 
 .version-type-badge.release {
-  background: #E8F5E9;
-  color: #2E7D32;
+  background: color-mix(in srgb, var(--success) 15%, transparent);
+  color: var(--success);
 }
 
 .version-type-badge.snapshot {
-  background: #FFF3E0;
-  color: #E65100;
+  background: color-mix(in srgb, var(--warning, #FF9800) 15%, transparent);
+  color: var(--warning, #E65100);
 }
 
 .version-date {
@@ -1427,11 +1148,11 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
   padding: 60px 0;
   gap: 16px;
   color: var(--text-secondary);
-  background: rgba(255, 255, 255, 0.45);
+  background: var(--glass-bg-light);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.25);
+  border: 1px dashed var(--border);
 }
 
 .back-link {
@@ -1444,9 +1165,7 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
   margin-bottom: 16px;
 }
 
-.back-link:hover {
-  text-decoration: underline;
-}
+.back-link:hover { text-decoration: underline; }
 
 .download-detail {
   max-width: 600px;
@@ -1470,9 +1189,7 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
   color: var(--text);
 }
 
-.form-group {
-  margin-bottom: 20px;
-}
+.form-group { margin-bottom: 20px; }
 
 .form-group label {
   display: block;
@@ -1482,7 +1199,6 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
   margin-bottom: 6px;
 }
 
-/* 高级选项 */
 .advanced-section {
   margin-bottom: 20px;
   border: 1px solid var(--border);
@@ -1504,9 +1220,7 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
   transition: background 0.15s;
 }
 
-.advanced-toggle:hover {
-  background: #F0F0F0;
-}
+.advanced-toggle:hover { background: var(--bg-secondary); }
 
 .advanced-content {
   padding: 16px;
@@ -1569,10 +1283,7 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
   -webkit-backdrop-filter: blur(8px);
 }
 
-.loader-item:hover {
-  border-color: var(--primary);
-}
-
+.loader-item:hover { border-color: var(--primary); }
 .loader-item.selected {
   border-color: var(--primary);
   background: var(--glass-bg-heavy);
@@ -1603,18 +1314,18 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
 }
 
 .loader-tag.stable {
-  background: #E8F5E9;
-  color: #2E7D32;
+  background: color-mix(in srgb, var(--success) 15%, transparent);
+  color: var(--success);
 }
 
 .loader-tag.preview {
-  background: #FFF3E0;
-  color: #E65100;
+  background: color-mix(in srgb, var(--warning, #FF9800) 15%, transparent);
+  color: var(--warning, #E65100);
 }
 
 .loader-tag.installed {
-  background: #E3F2FD;
-  color: #1565C0;
+  background: color-mix(in srgb, var(--primary) 15%, transparent);
+  color: var(--primary);
 }
 
 .selected-loader-hint {
@@ -1644,16 +1355,13 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
   gap: 6px;
 }
 
-/* Mod 搜索 */
 .mod-search-bar {
   display: flex;
   gap: 10px;
   margin-bottom: 16px;
 }
 
-.mod-search-input {
-  flex: 1;
-}
+.mod-search-input { flex: 1; }
 
 .mod-filters {
   display: flex;
@@ -1694,7 +1402,7 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
 
 .mod-card:hover {
   border-color: var(--primary);
-  box-shadow: 0 2px 12px rgba(0, 188, 212, 0.1);
+  box-shadow: 0 2px 12px color-mix(in srgb, var(--primary) 15%, transparent);
 }
 
 .mod-card-icon {
@@ -1721,13 +1429,8 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
   color: var(--primary);
 }
 
-.mod-icon-placeholder.small {
-  font-size: 14px;
-}
-
-.mod-icon-placeholder.large {
-  font-size: 28px;
-}
+.mod-icon-placeholder.small { font-size: 14px; }
+.mod-icon-placeholder.large { font-size: 28px; }
 
 .mod-card-info {
   flex: 1;
@@ -1780,8 +1483,8 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
   font-size: 10px;
   padding: 1px 6px;
   border-radius: 4px;
-  background: #E0F7FA;
-  color: #00838F;
+  background: color-mix(in srgb, var(--primary) 15%, transparent);
+  color: var(--primary);
   font-weight: 500;
 }
 
@@ -1789,12 +1492,11 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
   font-size: 10px;
   padding: 1px 6px;
   border-radius: 4px;
-  background: #F3E5F5;
-  color: #7B1FA2;
+  background: color-mix(in srgb, var(--accent-purple, #9C27B0) 15%, transparent);
+  color: var(--accent-purple, #7B1FA2);
   font-weight: 500;
 }
 
-/* Mod 详情 */
 .mod-detail {
   max-width: 800px;
   background: var(--glass-bg);
@@ -1850,21 +1552,20 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
   line-height: 1.5;
 }
 
-/* 依赖信息 */
 .mod-deps-section {
   margin-bottom: 20px;
   padding: 14px;
   background: var(--glass-bg-heavy);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
-  border: 1px solid #FFE082;
+  border: 1px solid color-mix(in srgb, var(--warning, #FF9800) 25%, transparent);
   border-radius: 10px;
 }
 
 .mod-deps-section h3 {
   font-size: 14px;
   font-weight: 600;
-  color: #F57F17;
+  color: var(--warning, #F57F17);
   margin-bottom: 10px;
 }
 
@@ -1918,21 +1619,20 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
 }
 
 .mod-dep-type.required {
-  background: #FFCDD2;
-  color: #C62828;
+  background: color-mix(in srgb, var(--danger) 15%, transparent);
+  color: var(--danger);
 }
 
 .mod-dep-type.optional {
-  background: #C8E6C9;
-  color: #2E7D32;
+  background: color-mix(in srgb, var(--success) 15%, transparent);
+  color: var(--success);
 }
 
 .mod-dep-type.incompatible {
-  background: #FFCDD2;
-  color: #B71C1C;
+  background: color-mix(in srgb, var(--danger) 20%, transparent);
+  color: var(--danger);
 }
 
-/* 版本列表 */
 .mod-version-list {
   display: flex;
   flex-direction: column;
@@ -1976,7 +1676,6 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
   margin-left: 12px;
 }
 
-/* 分页 */
 .pagination {
   display: flex;
   align-items: center;
@@ -1991,10 +1690,7 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
   color: var(--text-secondary);
 }
 
-/* Java 下载区域 */
-.java-section {
-  max-width: 700px;
-}
+.java-section { max-width: 700px; }
 
 .java-hint {
   font-size: 13px;
@@ -2002,9 +1698,9 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
   margin-bottom: 20px;
   padding: 10px 14px;
   background: var(--glass-bg-heavy);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   border-radius: 8px;
-  /* 移除 backdrop-filter：多层模糊叠加会导致 WebView2 在部分电脑上 GPU 渲染崩溃 */
-  contain: content;
 }
 
 .java-download-list {
@@ -2021,14 +1717,12 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
   border: 1.5px solid var(--border);
   border-radius: 12px;
   transition: border-color 0.15s;
-  background: rgba(255, 255, 255, 0.75);
-  /* 移除 backdrop-filter：多层模糊叠加会导致 WebView2 在部分电脑上 GPU 渲染崩溃 */
-  contain: content;
+  background: var(--glass-bg);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
 }
 
-.java-download-card:hover {
-  border-color: var(--primary);
-}
+.java-download-card:hover { border-color: var(--primary); }
 
 .java-card-left {
   display: flex;
@@ -2048,10 +1742,10 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
   color: white;
 }
 
-.java-icon-8 { background: #43A047; }
-.java-icon-17 { background: #FB8C00; }
-.java-icon-21 { background: #00897B; }
-.java-icon-26 { background: #546E7A; }
+.java-icon-8 { background: var(--java-green, #43A047); }
+.java-icon-17 { background: var(--java-orange, #FB8C00); }
+.java-icon-21 { background: var(--java-teal, #00897B); }
+.java-icon-26 { background: var(--java-gray, #546E7A); }
 
 .java-card-name {
   font-size: 16px;
@@ -2068,13 +1762,11 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
 }
 
 .java-installed {
-  color: #2E7D32;
+  color: var(--success);
   font-weight: 500;
 }
 
-.java-not-installed {
-  color: var(--text-light);
-}
+.java-not-installed { color: var(--text-light); }
 
 .java-webpage-tag,
 .java-msi-tag,
@@ -2085,9 +1777,9 @@ const totalPages = computed(() => Math.ceil(modSearchTotal.value / 20))
   font-weight: 500;
 }
 
-.java-webpage-tag { background: #E3F2FD; color: #1565C0; }
-.java-msi-tag { background: #FFF3E0; color: #E65100; }
-.java-zip-tag { background: #F3E5F5; color: #7B1FA2; }
+.java-webpage-tag { background: color-mix(in srgb, var(--primary) 15%, transparent); color: var(--primary); }
+.java-msi-tag { background: color-mix(in srgb, var(--warning, #FF9800) 15%, transparent); color: var(--warning, #E65100); }
+.java-zip-tag { background: color-mix(in srgb, var(--accent-purple, #9C27B0) 15%, transparent); color: var(--accent-purple, #7B1FA2); }
 
 .java-card-right {
   display: flex;
@@ -2102,117 +1794,5 @@ h3 {
   font-weight: 600;
   color: var(--text);
   margin-bottom: 12px;
-}
-
-/* ===== 辅助模式 ===== */
-.helper-setup-container {
-  max-width: 720px;
-  margin: 0 auto;
-  width: 100%;
-}
-
-.helper-setup-desc {
-  font-size: 13px;
-  color: var(--text-secondary);
-  margin-bottom: 16px;
-  line-height: 1.6;
-}
-
-.helper-search-btn {
-  width: 100%;
-  margin-bottom: 16px;
-}
-
-.mc-folder-list {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin-bottom: 16px;
-}
-
-.mc-folder-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 12px 16px;
-  border: 1.5px solid var(--border);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.6);
-  transition: border-color 0.15s;
-}
-
-.mc-folder-item:hover {
-  border-color: #9C27B0;
-}
-
-.mc-folder-title {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text);
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.mc-launcher-tag {
-  padding: 1px 8px;
-  color: white;
-  border-radius: 4px;
-  font-size: 11px;
-  font-weight: 600;
-}
-
-.mc-tag-pcl { background: #5C6BC0; }
-.mc-tag-hmcl { background: #00897B; }
-.mc-tag-qgl { background: #9C27B0; }
-.mc-tag-official { background: #78909C; }
-
-.mc-folder-path {
-  font-size: 12px;
-  color: var(--text-secondary);
-  margin-top: 2px;
-  word-break: break-all;
-}
-
-.mc-manual-row {
-  display: flex;
-  gap: 10px;
-}
-
-.mc-manual-row .input {
-  flex: 1;
-}
-
-/* 辅助模式紫色主题 */
-.helper-mode .tab-btn.active,
-.helper-mode .filter-btn.active {
-  color: #9C27B0 !important;
-  border-bottom-color: #9C27B0 !important;
-}
-
-.helper-mode .btn-primary {
-  background: #9C27B0 !important;
-  border-color: #9C27B0 !important;
-}
-
-.helper-mode .btn-primary:hover:not(:disabled) {
-  background: #AB47BC !important;
-  border-color: #AB47BC !important;
-}
-
-.helper-mode .mod-card:hover,
-.helper-mode .mod-version-item:hover {
-  border-color: #9C27B0 !important;
-}
-
-.helper-page .btn-primary {
-  background: #9C27B0;
-  border-color: #9C27B0;
-}
-
-.helper-page .btn-primary:hover:not(:disabled) {
-  background: #AB47BC;
-  border-color: #AB47BC;
 }
 </style>

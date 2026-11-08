@@ -126,6 +126,28 @@ func parseMappedIPv6(host string) (net.IP, bool) {
 	return nil, false
 }
 
+// canonicalHostName 把主机名归一化成比较用的形态：去空白、去掉表示绝对域名的
+// 尾随点、转小写。DNS 对 "LOCALHOST" / "localhost." 与 "localhost" 解析结果一致，
+// 字符串态判定必须先做这一步，否则同一个目标会因写法不同走出不同结论。
+func canonicalHostName(host string) string {
+	return strings.TrimRight(strings.ToLower(strings.TrimSpace(host)), ".")
+}
+
+// isLoopbackHostName 判定主机名是否是“永远指向本机”的保留名字。这些名字在任何
+// 解析器下都落到回环地址，字符串态就不可能解析成公网 IP，必须在拨号之前就按回环
+// 处理，不能指望 DNS 层兜底（"localhost." / "LOCALHOST" 这类写法在历史上的
+// 字符串判定里会被当成普通域名放行）。
+func isLoopbackHostName(host string) bool {
+	name := canonicalHostName(host)
+	if name == "" {
+		return false
+	}
+	if name == "localhost" || name == "ip6-localhost" || name == "ip6-loopback" {
+		return true
+	}
+	return strings.HasSuffix(name, ".localhost")
+}
+
 // parseDestIP 判断 host 是不是 IP 字面量并还原成规范 net.IP。
 // 域名（含 localhost、单标签主机名）返回 ok=false。识别顺序：
 //  1. 去掉 IPv6 作用域（%eth0）与空白；

@@ -49,12 +49,7 @@ type WhitelistAudit struct {
 }
 
 func (a WhitelistAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f WhitelistFinding) bool { return f.Blocking })
 }
 
 func (a WhitelistAudit) HasWarnings() bool {

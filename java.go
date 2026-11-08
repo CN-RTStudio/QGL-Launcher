@@ -1,10 +1,9 @@
 package main
 
 import (
-	"encoding/json"
+	"bytes"
+	"context"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,18 +12,17 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 )
 
 // JavaEntry 表示一个已安装的 Java 运行时
 type JavaEntry struct {
-	Path       string `json:"path"`       // javaw.exe 完整路径
-	Version    string `json:"version"`    // 版本号字符串，如 "1.8.0_321"
-	MajorVer   int    `json:"majorVer"`   // 主版本号，如 8, 17, 21
-	Is64Bit    bool   `json:"is64Bit"`    // 是否64位
-	IsJDK      bool   `json:"isJDK"`      // 是否JDK
+	Path     string `json:"path"`     // javaw.exe 完整路径
+	Version  string `json:"version"`  // 版本号字符串，如 "1.8.0_321"
+	MajorVer int    `json:"majorVer"` // 主版本号，如 8, 17, 21
+	Is64Bit  bool   `json:"is64Bit"`  // 是否64位
+	IsJDK    bool   `json:"isJDK"`    // 是否JDK
 }
 
 // JavaVersionReq 表示 MC 版本对 Java 的版本需求
@@ -33,8 +31,39 @@ type JavaVersionReq struct {
 	MaxMajor int // 最高主版本号（0表示无上限）
 }
 
-// SearchJava 搜索系统中所有已安装的 Java
+// SearchJava 搜索系统中所有已安装的 Java。
+// 全盘扫描（A-Z 盘 + AppData 递归）很慢，而一次启动流程里选 Java、安装器
+// 选 Java、兼容检查会反复调用。对结果做短时缓存，TTL 内直接返回快照，
+// 避免每次都把所有磁盘遍历一遍造成明显卡顿。
+var (
+	javaSearchMu    sync.Mutex
+	javaSearchCache []JavaEntry
+	javaSearchAt    time.Time
+)
+
+// javaSearchTTL 内复用上次全盘扫描结果；用户新装 JDK 后重新搜索最坏等待 TTL。
+const javaSearchTTL = 2 * time.Minute
+
 func (a *App) SearchJava() []JavaEntry {
+	javaSearchMu.Lock()
+	if javaSearchCache != nil && time.Since(javaSearchAt) < javaSearchTTL {
+		cached := append([]JavaEntry(nil), javaSearchCache...)
+		javaSearchMu.Unlock()
+		return cached
+	}
+	javaSearchMu.Unlock()
+
+	results := a.scanJavaInstallations()
+
+	javaSearchMu.Lock()
+	javaSearchCache = append([]JavaEntry(nil), results...)
+	javaSearchAt = time.Now()
+	javaSearchMu.Unlock()
+	return results
+}
+
+// scanJavaInstallations 执行实际的全盘 Java 扫描，SearchJava 的 TTL 缓存包在外面。
+func (a *App) scanJavaInstallations() []JavaEntry {
 	var results []JavaEntry
 	seen := make(map[string]bool)
 
@@ -51,7 +80,6 @@ func (a *App) SearchJava() []JavaEntry {
 		"C:\\Program Files\\Amazon Corretto",
 		"C:\\Program Files\\Semeru",
 	}
-
 	for _, baseDir := range commonPaths {
 		entries, err := os.ReadDir(baseDir)
 		if err != nil {
@@ -117,7 +145,7 @@ func (a *App) SearchJava() []JavaEntry {
 	searchDirForJava(appDir, &results, seen, 3)
 
 	// 5. 搜索 .minecraft 目录
-	mcDir := a.getMinecraftDir()
+	mcDir := a.GetMinecraftDir()
 	searchDirForJava(mcDir, &results, seen, 3)
 
 	// 6. 搜索 AppData 下的 Java
@@ -158,6 +186,23 @@ func (a *App) SearchJava() []JavaEntry {
 	return results
 }
 
+// isReparsePointDir 判断目录条目是否为 reparse point（junction / 符号链接 /
+// 挂载点）。全盘递归扫描（AppData、磁盘根）若跟随 junction，可能被引到另一个
+// 卷或系统目录（例如用户把某目录联接成 C:\ 根），既拖慢扫描又会发现扫描范围
+// 之外的 Java；maxDepth 也挡不住 junction 构成的环之外的横向跳转。
+// 发现阶段只认真实目录：当前层级的 javaw.exe 探测照常（显式安装的 JDK 不受
+// 影响），但绝不递归进入 reparse point。
+func isReparsePointDir(entry os.DirEntry) bool {
+	info, err := entry.Info()
+	if err != nil {
+		return false
+	}
+	if data, ok := info.Sys().(*syscall.Win32FileAttributeData); ok {
+		return data.FileAttributes&syscall.FILE_ATTRIBUTE_REPARSE_POINT != 0
+	}
+	return false
+}
+
 // searchDriveForJava 搜索磁盘驱动器上的 Java（参考PCL的磁盘遍历逻辑）
 // 只搜索根目录下的 Java 相关文件夹，避免全盘递归太慢
 func searchDriveForJava(drivePath string, results *[]JavaEntry, seen map[string]bool) {
@@ -165,21 +210,18 @@ func searchDriveForJava(drivePath string, results *[]JavaEntry, seen map[string]
 	if err != nil {
 		return
 	}
-
 	// 需要进入搜索的根目录关键字（参考PCL的JavaSearchFolder关键字列表）
 	rootKeywords := []string{
 		"java", "jdk", "jre", "program", "software", "soft", "app",
 		"develop", "dev", "tools", "runtime", "env", "游戏", "game",
 		"mc", "minecraft", "launch", "启动", "运行", "应用",
 	}
-
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
 		name := entry.Name()
 		lowerName := strings.ToLower(name)
-
 		// 直接检查该目录下是否有 bin/javaw.exe
 		javawPath := filepath.Join(drivePath, name, "bin", "javaw.exe")
 		if _, err := os.Stat(javawPath); err == nil && !seen[javawPath] {
@@ -189,7 +231,6 @@ func searchDriveForJava(drivePath string, results *[]JavaEntry, seen map[string]
 				*results = append(*results, *javaEntry)
 			}
 		}
-
 		// 判断是否需要进入该目录搜索
 		shouldEnter := false
 		for _, kw := range rootKeywords {
@@ -198,8 +239,11 @@ func searchDriveForJava(drivePath string, results *[]JavaEntry, seen map[string]
 				break
 			}
 		}
-
 		if shouldEnter {
+			// 不跟随 junction / 符号链接，避免扫到其它卷或陷入联接环。
+			if isReparsePointDir(entry) {
+				continue
+			}
 			searchDirForJava(filepath.Join(drivePath, name), results, seen, 4)
 		}
 	}
@@ -210,12 +254,10 @@ func searchDirForJava(dir string, results *[]JavaEntry, seen map[string]bool, ma
 	if maxDepth <= 0 {
 		return
 	}
-
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
-
 	// 关键字列表（参考PCL）
 	keywords := []string{
 		"java", "jdk", "jre", "runtime", "env", "run", "soft",
@@ -224,14 +266,12 @@ func searchDirForJava(dir string, results *[]JavaEntry, seen map[string]bool, ma
 		"program", "game", "mc", "minecraft", "version",
 		"x64", "x86", "bin", "users",
 	}
-
 	for _, entry := range entries {
 		if !entry.IsDir() {
 			continue
 		}
 		name := entry.Name()
 		lowerName := strings.ToLower(name)
-
 		// 检查 bin 目录下是否有 javaw.exe
 		javawPath := filepath.Join(dir, name, "bin", "javaw.exe")
 		if _, err := os.Stat(javawPath); err == nil && !seen[javawPath] {
@@ -241,7 +281,6 @@ func searchDirForJava(dir string, results *[]JavaEntry, seen map[string]bool, ma
 				*results = append(*results, *javaEntry)
 			}
 		}
-
 		// 决定是否进入子目录
 		shouldEnter := false
 		// 数字开头的目录（版本号）
@@ -265,54 +304,121 @@ func searchDirForJava(dir string, results *[]JavaEntry, seen map[string]bool, ma
 				}
 			}
 		}
-
 		if shouldEnter {
+			// 不跟随 junction / 符号链接：AppData 下的目录联接可能指向
+			// Program Files 或其它卷，真实目录会由对应的固定扫描路径发现。
+			if isReparsePointDir(entry) {
+				continue
+			}
 			searchDirForJava(filepath.Join(dir, name), results, seen, maxDepth-1)
 		}
 	}
 }
 
+// maxJavaVersionOutput 限制 `java -version` 的输出体积。
+// 正常输出只有几百字节；用户选择的"Java 路径"是前端绑定方法可直接传入的
+// 参数，若放任输出不设上限，一个伪造的 java.exe 打印海量内容即可撑爆内存。
+const maxJavaVersionOutput int64 = 1 << 20 // 1 MiB
+
+// limitedWriter 最多写入 max+1 字节，多出的字节直接丢弃，
+// 调用方通过 n>max 判定输出超限。stdout/stderr 可能并发写入，需加锁。
+type limitedWriter struct {
+	mu  sync.Mutex
+	buf *bytes.Buffer
+	max int64
+	n   int64
+}
+
+func (w *limitedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.n += int64(len(p))
+	remain := w.max + 1 - int64(w.buf.Len())
+	if remain > 0 {
+		if int64(len(p)) < remain {
+			remain = int64(len(p))
+		}
+		w.buf.Write(p[:remain])
+	}
+	return len(p), nil
+}
+
+// isJavaBinaryName 校验传入路径指向的确实是 java / javaw 可执行文件。
+// GetJavaInfo 等绑定方法的路径参数前端可控，必须挡住 cmd.exe、脚本等
+// 非 Java 可执行文件，避免它退化为"带固定参数的任意程序执行"原语。
+func isJavaBinaryName(p string) bool {
+	switch strings.ToLower(filepath.Base(p)) {
+	case "java.exe", "javaw.exe":
+		return true
+	}
+	return false
+}
+
 // validateJava 验证 Java 路径并获取版本信息（参考PCL的JavaEntry.Check）
+// 安全加固: 添加 10 秒超时，防止 Java 进程挂起导致应用卡住
 func validateJava(javawPath string) *JavaEntry {
+	javawPath = filepath.Clean(javawPath)
+	if !isJavaBinaryName(javawPath) {
+		return nil
+	}
 	// 检查 javaw.exe 是否存在
 	if _, err := os.Stat(javawPath); err != nil {
 		return nil
 	}
-
 	// 检查 java.exe 是否存在（同目录下）
 	dir := filepath.Dir(javawPath)
 	javaExePath := filepath.Join(dir, "java.exe")
+	if !isJavaBinaryName(javaExePath) {
+		return nil
+	}
 	if _, err := os.Stat(javaExePath); err != nil {
 		return nil
 	}
-
+	// 供应链防护：标准布局下 java.exe 位于 <JDK_HOME>//bin。若该文件（或其上级）
+	// 是指向 JDK 目录之外的符号链接 / junction，解析后的真实路径会逃出 JDK_HOME，
+	// 这常见于被篡改的 JAVA_HOME 或预置的链接型“影子 JDK”，命中即拒绝信任。
+	if strings.EqualFold(filepath.Base(dir), "bin") {
+		jdkHome := filepath.Dir(dir)
+		if _, ok := ResolvedPathWithinRoot(javaExePath, jdkHome); !ok {
+			return nil
+		}
+	}
 	// 判断是否为 JDK（检查 javac.exe）
 	javacPath := filepath.Join(dir, "javac.exe")
 	isJDK := false
 	if _, err := os.Stat(javacPath); err == nil {
 		isJDK = true
 	}
-
-	// 运行 java -version 获取版本信息
-	cmd := exec.Command(javaExePath, "-version")
+	// 运行 java -version 获取版本信息（带超时）
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, javaExePath, "-version")
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		// 某些 Java 即使成功也会返回非零退出码
-		// 尝试解析输出
+	// 版本探测同样会真正启动一次 JVM：不净化环境的话，
+	// JAVA_TOOL_OPTIONS 里的 javaagent 会在探测阶段就被加载并执行。
+	probeEnv, _ := currentGameEnvironment(nil)
+	cmd.Env = probeEnv
+	var outBuf bytes.Buffer
+	lw := &limitedWriter{buf: &outBuf, max: maxJavaVersionOutput}
+	cmd.Stdout = lw
+	cmd.Stderr = lw
+	runErr := cmd.Run()
+	if runErr != nil && ctx.Err() != nil {
+		// 超时，跳过这个 Java
+		return nil
 	}
-
-	outputStr := string(output)
-
+	if lw.n > maxJavaVersionOutput {
+		// 输出体积异常，疑似伪造可执行文件
+		return nil
+	}
+	outputStr := outBuf.String()
 	// 解析版本号（参考PCL的正则匹配逻辑）
 	version, majorVer := parseJavaVersion(outputStr)
 	if majorVer <= 0 {
 		return nil
 	}
-
 	// 检测是否为64位
 	is64Bit := strings.Contains(outputStr, "64-Bit") || strings.Contains(outputStr, "64-bit")
-
 	return &JavaEntry{
 		Path:     javawPath,
 		Version:  version,
@@ -331,7 +437,6 @@ func parseJavaVersion(output string) (string, int) {
 		rawVersion := matches[1]
 		return normalizeJavaVersion(rawVersion)
 	}
-
 	// 匹配 openjdk 格式
 	re2 := regexp.MustCompile(`openjdk (\d[\d._]*)`)
 	matches = re2.FindStringSubmatch(output)
@@ -339,7 +444,6 @@ func parseJavaVersion(output string) (string, int) {
 		rawVersion := matches[1]
 		return normalizeJavaVersion(rawVersion)
 	}
-
 	return "", 0
 }
 
@@ -351,11 +455,9 @@ func normalizeJavaVersion(raw string) (string, int) {
 	if idx := strings.Index(raw, "-"); idx > 0 {
 		raw = raw[:idx]
 	}
-
 	// 解析版本号段
 	parts := strings.Split(raw, ".")
 	majorVer := 0
-
 	if len(parts) >= 1 {
 		// 如果以 "1." 开头（旧版本格式，如 1.8.0）
 		if parts[0] == "1" && len(parts) >= 2 {
@@ -366,11 +468,9 @@ func normalizeJavaVersion(raw string) (string, int) {
 			majorVer, _ = strconv.Atoi(parts[0])
 		}
 	}
-
 	if majorVer <= 0 || majorVer >= 100 {
 		return "", 0
 	}
-
 	return raw, majorVer
 }
 
@@ -418,21 +518,18 @@ func (a *App) GetJavaRequirement(versionID string) JavaVersionReq {
 		MinMajor: 0,
 		MaxMajor: 0, // 0 表示无上限
 	}
-
+	// 安全：验证 versionID 不含路径遍历
+	if err := sanitizePathComponent(versionID); err != nil {
+		return req
+	}
 	// 读取版本 JSON 获取发布时间
-	mcDir := a.getMinecraftDir()
+	mcDir := a.GetMinecraftDir()
 	jsonPath := filepath.Join(mcDir, "versions", versionID, versionID+".json")
-	jsonData, err := os.ReadFile(jsonPath)
-	if err != nil {
-		// 无法读取，使用默认需求
-		return req
-	}
-
 	var versionJSON VersionJSON
-	if err := json.Unmarshal(jsonData, &versionJSON); err != nil {
+	if err := readLocalJSONBounded(jsonPath, &versionJSON, 0, "版本 JSON"); err != nil {
+		// 无法读取/解析，使用默认需求
 		return req
 	}
-
 	// 解析发布时间
 	releaseTime := versionJSON.ReleaseTime
 	releaseYear := 0
@@ -443,27 +540,23 @@ func (a *App) GetJavaRequirement(versionID string) JavaVersionReq {
 	if len(releaseTime) >= 7 {
 		releaseMonth, _ = strconv.Atoi(releaseTime[5:7])
 	}
-
 	// 解析 MC 版本号
 	mcMajor, mcMinor, mcPatch := parseMCVersion(versionID)
-
 	// 根据版本号和发布时间确定 Java 需求（参考PCL的McLaunchJava）
 	_ = mcPatch
-
 	// MC 1.20.5+ (24w14a+) -> Java 21+
 	if mcMajor > 1 || (mcMajor == 1 && mcMinor >= 21) || (mcMajor == 1 && mcMinor == 20 && mcPatch >= 5) {
 		req.MinMajor = 21
-	} else if mcMajor > 1 || (mcMajor == 1 && mcMinor >= 18) {
-		// MC 1.18+ -> Java 17+
+	} else if mcMajor == 1 && mcMinor >= 18 {
+		// MC 1.18+ -> Java 17+（走到 else 时 mcMajor>1 已被上一支覆盖）
 		req.MinMajor = 17
-	} else if mcMajor > 1 || (mcMajor == 1 && mcMinor >= 17) {
+	} else if mcMajor == 1 && mcMinor >= 17 {
 		// MC 1.17+ -> Java 16+
 		req.MinMajor = 16
 	} else if releaseYear >= 2017 {
 		// MC 1.12+ -> Java 8+
 		req.MinMajor = 8
 	}
-
 	// MC 1.16.5 及更早版本：Java 17+ 不兼容（内部 API 变更导致崩溃）
 	if mcMajor == 1 && mcMinor <= 16 {
 		req.MaxMajor = 16
@@ -472,7 +565,6 @@ func (a *App) GetJavaRequirement(versionID string) JavaVersionReq {
 	if releaseYear < 2013 || (releaseYear == 2013 && releaseMonth <= 5) {
 		req.MaxMajor = 12
 	}
-
 	// ===== 低版本 Forge 与高版本 Java 不兼容检测 =====
 	// 参考 PCL：CrashReason.低版本Forge与高版本Java不兼容
 	// securejarhandler 0.9.x 在 Java 17+ 中会崩溃（NoSuchMethodError: ManifestEntryVerifier）
@@ -491,11 +583,9 @@ func (a *App) GetJavaRequirement(versionID string) JavaVersionReq {
 			}
 		}
 	}
-
 	// 检查版本 JSON 中的 java_version 字段（新版 MC 可能包含）
 	// 这在 version.json 的根级别或 jar 内的 version.json 中
 	// 暂时不从 jar 中读取，只检查外部 JSON
-
 	return req
 }
 
@@ -515,28 +605,26 @@ func (a *App) getSecureJarHandlerVersion(versionID string, versionJSON *VersionJ
 }
 
 // parseMCVersion 解析 MC 版本号，返回 (major, minor, patch)
+// r34：实现改为复用 semverguard 的严格解析内核。旧实现用 strconv.Atoi 逐段转换且
+// 完全忽略错误，"1.abc" 会得到 major=1/minor=0、"1.20.x" 的 patch 静默变 0，负数与
+// 溢出段也不被识别，导致“按版本挑 Java”落到错误默认值。现在先剥离 forge/fabric 等
+// 加载器后缀，再要求上游版本核心严格可解析；release / prerelease 返回真实主.次.
+// 修订，快照（24w14a）与任何畸形串统一返回 0,0,0（与历史“无法解析”默认值一致）。
 func parseMCVersion(versionID string) (int, int, int) {
-	// 去除可能的快照后缀
-	versionID = strings.Split(versionID, "-")[0]
-	versionID = strings.Split(versionID, " ")[0]
-
-	parts := strings.Split(versionID, ".")
-	major, _ := strconv.Atoi(parts[0])
-	minor := 0
-	patch := 0
-	if len(parts) >= 2 {
-		minor, _ = strconv.Atoi(parts[1])
+	core := stripLoaderSuffix(versionID)
+	parsed, ok := ParseMinecraftVersion(core)
+	if !ok {
+		return 0, 0, 0
 	}
-	if len(parts) >= 3 {
-		patch, _ = strconv.Atoi(parts[2])
+	if parsed.Kind != mcVersionRelease && parsed.Kind != mcVersionPrerelease {
+		return 0, 0, 0
 	}
-	return major, minor, patch
+	return parsed.Major, parsed.Minor, parsed.Patch
 }
 
 // SelectJavaForVersion 为指定 MC 版本选择合适的 Java
 func (a *App) SelectJavaForVersion(versionID string) (*JavaEntry, error) {
 	req := a.GetJavaRequirement(versionID)
-
 	// 1. 便携版模式：优先使用 QGL\pe\java\bin\java.exe
 	config, _ := a.GetGlobalConfig()
 	if config != nil && config.PortableMode {
@@ -548,7 +636,6 @@ func (a *App) SelectJavaForVersion(versionID string) (*JavaEntry, error) {
 			// 便携版 Java 不兼容，继续搜索其他 Java
 		}
 	}
-
 	// 2. 检查用户手动设置的 Java
 	if config != nil && config.JavaPath != "" {
 		javaEntry := validateJava(config.JavaPath)
@@ -565,23 +652,19 @@ func (a *App) SelectJavaForVersion(versionID string) (*JavaEntry, error) {
 				javaEntry.Version, javaEntry.MajorVer, versionID, displayMin, formatMaxVer(req.MaxMajor))
 		}
 	}
-
 	// 3. 搜索系统中所有 Java
 	javaList := a.SearchJava()
-
-	// 3. 过滤出兼容的 Java
+	// 4. 过滤出兼容的 Java
 	var compatible []JavaEntry
 	for _, j := range javaList {
 		if isJavaCompatible(&j, req) {
 			compatible = append(compatible, j)
 		}
 	}
-
 	if len(compatible) > 0 {
 		return &compatible[0], nil
 	}
-
-	// 4. 没有找到兼容的 Java
+	// 5. 没有找到兼容的 Java
 	displayMin := req.MinMajor
 	if displayMin <= 0 {
 		displayMin = 8
@@ -589,7 +672,6 @@ func (a *App) SelectJavaForVersion(versionID string) (*JavaEntry, error) {
 	if len(javaList) == 0 {
 		return nil, fmt.Errorf("未找到任何已安装的 Java，请安装 Java %d 或更高版本", displayMin)
 	}
-
 	// 有 Java 但不兼容
 	best := javaList[0]
 	return nil, fmt.Errorf("未找到适用于 MC %s 的 Java (需要 Java %d-%s)，当前最接近的 Java 为 %s (Java %d)，请安装合适的 Java 版本",
@@ -637,286 +719,60 @@ type JavaDownloadInfo struct {
 }
 
 // GetJavaDownloadList 获取 Java 下载列表
-// 回退方案为系统默认浏览器打开 Oracle 官方下载页（Mojang runtime 清单失败时使用）
+// 使用 Adoptium Temurin（开源 GPLv2+CE，无商业许可风险，自动获取最新安全补丁）
 func (a *App) GetJavaDownloadList() []JavaDownloadInfo {
 	return []JavaDownloadInfo{
 		{
-			MajorVer:  27,
-			Name:      "Java 27",
-			URL:       "https://www.oracle.com/cn/java/technologies/downloads/#jdk27-windows",
-			FileName:  "jdk-27-windows",
-			IsMSI:     false,
-			IsWebPage: true,
+			MajorVer: 21,
+			Name:     "Java 21 (LTS)",
+			URL:      "https://api.adoptium.net/v3/binary/latest/21/ga/windows/x64/jdk/hotspot/normal/eclipse",
+			FileName: "OpenJDK21U-jdk_x64_windows_hotspot.zip",
+			IsMSI:    false,
+			IsZip:    true,
 		},
 		{
-			MajorVer:  21,
-			Name:      "Java 21",
-			URL:       "https://www.oracle.com/cn/java/technologies/downloads/#java21-windows",
-			FileName:  "jdk-21-windows",
-			IsMSI:     false,
-			IsWebPage: true,
+			MajorVer: 17,
+			Name:     "Java 17 (LTS)",
+			URL:      "https://api.adoptium.net/v3/binary/latest/17/ga/windows/x64/jdk/hotspot/normal/eclipse",
+			FileName: "OpenJDK17U-jdk_x64_windows_hotspot.zip",
+			IsMSI:    false,
+			IsZip:    true,
 		},
 		{
-			MajorVer:  17,
-			Name:      "Java 17",
-			URL:       "https://www.oracle.com/cn/java/technologies/downloads/#java17-windows",
-			FileName:  "jdk-17-windows",
-			IsMSI:     false,
-			IsWebPage: true,
-		},
-		{
-			MajorVer:  8,
-			Name:      "Java 8",
-			URL:       "https://www.oracle.com/cn/java/technologies/downloads/#java8-windows",
-			FileName:  "java8-windows",
-			IsMSI:     false,
-			IsWebPage: true,
+			MajorVer: 8,
+			Name:     "Java 8 (旧版兼容)",
+			URL:      "https://api.adoptium.net/v3/binary/latest/8/ga/windows/x64/jre/hotspot/normal/eclipse",
+			FileName: "OpenJDK8U-jre_x64_windows_hotspot.zip",
+			IsMSI:    false,
+			IsZip:    true,
 		},
 	}
-}
-
-// ===== Mojang 官方 Java 运行时下载（参考 PCL 的 JavaFileList）=====
-
-// mojangJavaRuntimeIndexURL Mojang java-runtime 清单索引（BMCLAPI 有镜像，替换域名即可）
-const mojangJavaRuntimeIndexURL = "https://piston-meta.mojang.com/v1/products/java-runtime/2ec0cc96c44e5a76b9c8b7c39df7210883d12871/all.json"
-
-// javaRuntimeManifest Mojang java-runtime 清单条目
-type javaRuntimeEntry struct {
-	Name     string `json:"name"`
-	Version  struct {
-		Name string `json:"name"`
-	} `json:"version"`
-	Manifest struct {
-		URL string `json:"url"`
-	} `json:"manifest"`
-}
-
-// javaRuntimeFileEntry runtime manifest 中的文件条目
-type javaRuntimeFileEntry struct {
-	Type      string `json:"type"`
-	Downloads struct {
-		Raw *struct {
-			URL  string `json:"url"`
-			Size int64  `json:"size"`
-			SHA1 string `json:"sha1"`
-		} `json:"raw"`
-	} `json:"downloads"`
-}
-
-// fetchURLWithMirrors 依次尝试多个 URL 获取内容（先官方，失败走 BMCLAPI 镜像）
-func fetchURLWithMirrors(urls []string) ([]byte, error) {
-	var lastErr error
-	for _, u := range urls {
-		req, err := http.NewRequest("GET", u, nil)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.216 CosyBrowser/146.3.1")
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		data, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if resp.StatusCode != http.StatusOK {
-			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
-			continue
-		}
-		return data, nil
-	}
-	return nil, lastErr
-}
-
-// downloadJavaRuntime 通过 Mojang 官方 java-runtime 清单下载并安装 Java（免安装版，参考 PCL 的 JavaFileList + LoaderDownload）
-// 安装位置：<minecraftDir>/runtime/<运行时key>/，QGL 搜索 Java 时会扫描 .minecraft 目录自动发现
-func (a *App) downloadJavaRuntime(majorVer int) error {
-	a.writeLog("开始通过 Mojang 运行时清单下载 Java %d", majorVer)
-
-	// 1. 获取索引（官方 → BMCLAPI 镜像）
-	indexData, err := fetchURLWithMirrors([]string{
-		mojangJavaRuntimeIndexURL,
-		strings.Replace(mojangJavaRuntimeIndexURL, "piston-meta.mojang.com", "bmclapi2.bangbang93.com", 1),
-	})
-	if err != nil {
-		return fmt.Errorf("获取 Java 运行时索引失败: %v", err)
-	}
-
-	var index map[string][]javaRuntimeEntry
-	if err := json.Unmarshal(indexData, &index); err != nil {
-		return fmt.Errorf("解析 Java 运行时索引失败: %v", err)
-	}
-
-	entries, ok := index["windows-x64"]
-	if !ok || len(entries) == 0 {
-		return fmt.Errorf("索引中没有 windows-x64 的 Java 运行时")
-	}
-
-	// 2. 从后往前找版本名匹配的运行时（最新的优先，同 PCL 的 Children.Reverse）
-	majorStr := strconv.Itoa(majorVer)
-	var target *javaRuntimeEntry
-	for i := len(entries) - 1; i >= 0; i-- {
-		if strings.HasPrefix(entries[i].Version.Name, majorStr) {
-			target = &entries[i]
-			break
-		}
-	}
-	if target == nil {
-		return fmt.Errorf("Mojang 运行时清单中没有 Java %d", majorVer)
-	}
-
-	a.writeLog("选中 Java 运行时 %s（%s）", target.Version.Name, target.Name)
-
-	// 3. 获取文件列表 manifest（官方 → BMCLAPI 镜像）
-	manifestData, err := fetchURLWithMirrors([]string{
-		target.Manifest.URL,
-		strings.Replace(target.Manifest.URL, "piston-meta.mojang.com", "bmclapi2.bangbang93.com", 1),
-	})
-	if err != nil {
-		return fmt.Errorf("获取 Java 文件列表失败: %v", err)
-	}
-
-	var manifest struct {
-		Files map[string]javaRuntimeFileEntry `json:"files"`
-	}
-	if err := json.Unmarshal(manifestData, &manifest); err != nil {
-		return fmt.Errorf("解析 Java 文件列表失败: %v", err)
-	}
-
-	// 安装目录：<minecraftDir>/runtime/<key>/
-	mcDir := a.getMinecraftDir()
-	baseDir := filepath.Join(mcDir, "runtime", target.Name)
-
-	// PCL 跳过的 3 个无意义重复文件（#3827）
-	skipHashes := map[string]bool{
-		"12976a6c2b227cbac58969c1455444596c894656": true,
-		"c80e4bab46e34d02826eab226a4441d0970f2aba": true,
-		"84d2102ad171863db04e7ee22a259d1f6c5de4a5": true,
-	}
-
-	// 4. 收集任务：目录直接创建，文件校验大小后并发下载
-	type fileTask struct {
-		url  string
-		path string
-		size int64
-	}
-	var fileTasks []fileTask
-	totalFiles := 0
-	for relPath, entry := range manifest.Files {
-		destPath := filepath.Join(baseDir, filepath.FromSlash(relPath))
-		if entry.Type == "directory" {
-			os.MkdirAll(destPath, 0755)
-			continue
-		}
-		if entry.Downloads.Raw == nil {
-			continue
-		}
-		raw := entry.Downloads.Raw
-		if skipHashes[raw.SHA1] {
-			continue
-		}
-		totalFiles++
-		// 已存在且大小一致则跳过
-		if info, err := os.Stat(destPath); err == nil && info.Size() == raw.Size {
-			continue
-		}
-		// 官方源优先，BMCLAPI 镜像回退
-		fileTasks = append(fileTasks, fileTask{
-			url:  raw.URL,
-			path: destPath,
-			size: raw.Size,
-		})
-	}
-
-	// 5. 32 线程并发下载（与补全资源相同的模式）
-	total := int64(totalFiles)
-	var (
-		wg        sync.WaitGroup
-		taskCh    = make(chan fileTask)
-		doneCount int64
-		failCount int64
-		lastEmit  time.Time
-		emitMu    sync.Mutex
-	)
-	workers := 32
-	if workers > len(fileTasks) && len(fileTasks) > 0 {
-		workers = len(fileTasks)
-	}
-	if workers > 0 {
-		wg.Add(workers)
-		for w := 0; w < workers; w++ {
-			go func() {
-				defer wg.Done()
-				for task := range taskCh {
-					os.MkdirAll(filepath.Dir(task.path), 0755)
-					ok := a.downloadFromMirrors([]string{task.url, strings.Replace(task.url, "piston-data.mojang.com", "bmclapi2.bangbang93.com", 1)}, task.path)
-					if ok {
-						// 下载后校验大小
-						if info, err := os.Stat(task.path); err != nil || (task.size > 0 && info.Size() != task.size) {
-							os.Remove(task.path)
-							atomic.AddInt64(&failCount, 1)
-						}
-					} else {
-						atomic.AddInt64(&failCount, 1)
-					}
-					done := atomic.AddInt64(&doneCount, 1)
-					emitMu.Lock()
-					if time.Since(lastEmit) > 300*time.Millisecond {
-						lastEmit = time.Now()
-						emitMu.Unlock()
-						a.emitProgress("downloading", fmt.Sprintf("下载 Java %d/%d (%d%%)", done, total, done*100/total), done, total)
-						continue
-					}
-					emitMu.Unlock()
-				}
-			}()
-		}
-		for _, task := range fileTasks {
-			taskCh <- task
-		}
-		close(taskCh)
-		wg.Wait()
-	}
-
-	if failCount > 0 {
-		// 下载不完整，清理整个目录（同 PCL：防止残留只下了一半但 -version 能跑的 Java）
-		os.RemoveAll(baseDir)
-		return fmt.Errorf("Java 文件下载有 %d 个失败，已清理，请重试", failCount)
-	}
-
-	a.writeLog("Java %d 下载完成: %s", majorVer, baseDir)
-	a.emitProgress("downloading", fmt.Sprintf("Java %d 安装完成", majorVer), total, total)
-	return nil
 }
 
 // selectJavaForInstaller 选择适合运行加载器安装器的 Java（需要 Java 17+）
 func (a *App) selectJavaForInstaller() (*JavaEntry, error) {
 	javaList := a.SearchJava()
-
 	// 优先选择 Java 17+（ForgeInstaller 需要）
 	for _, j := range javaList {
 		if j.MajorVer >= 17 {
 			return &j, nil
 		}
 	}
-
 	// 回退到 Java 8+（某些旧版安装器可能兼容）
 	for _, j := range javaList {
 		if j.MajorVer >= 8 {
 			return &j, nil
 		}
 	}
-
 	return nil, fmt.Errorf("未找到合适的 Java（需要 Java 17+，最低 Java 8）")
 }
 
 // GetRecommendedJavaForVersion 获取推荐安装的 Java 版本号（供前端提示用）
 func (a *App) GetRecommendedJavaForVersion(versionID string) int {
+	// 安全：验证 versionID 不含路径遍历
+	if err := sanitizePathComponent(versionID); err != nil {
+		return 8
+	}
 	req := a.GetJavaRequirement(versionID)
 	if req.MinMajor > 0 {
 		return req.MinMajor

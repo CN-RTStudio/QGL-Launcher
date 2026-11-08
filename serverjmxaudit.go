@@ -242,7 +242,7 @@ func jmxReadScript(serverDir, name string) ([]byte, string) {
 	if info.Size() > jmxMaxFileBytes {
 		return nil, jmxReasonTooLarge
 	}
-	data, err := os.ReadFile(path)
+	data, err := readBoundedFile(path, auditTextReadMaxBytes)
 	if err != nil {
 		return nil, jmxReasonUnreadable
 	}
@@ -293,7 +293,7 @@ func AuditServerJMX(serverDir string) JMXAudit {
 			audit.add(name, jmxReasonTooLarge, "JMX 管理配置过大", true)
 			continue
 		}
-		data, err := os.ReadFile(path)
+		data, err := readBoundedFile(path, auditTextReadMaxBytes)
 		if err != nil {
 			audit.add(name, jmxReasonUnreadable, "JMX 管理配置不可读", true)
 			continue

@@ -52,12 +52,7 @@ type SessionLockAudit struct {
 }
 
 func (a SessionLockAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f SessionLockFinding) bool { return f.Blocking })
 }
 
 func (a SessionLockAudit) HasWarnings() bool {

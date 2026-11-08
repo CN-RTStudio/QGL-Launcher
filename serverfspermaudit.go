@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 )
 
@@ -51,17 +50,7 @@ func (a *ServerFSPermAudit) HasWarnings() bool {
 }
 
 func (a *ServerFSPermAudit) Codes() []string {
-	seen := map[string]bool{}
-	codes := make([]string, 0, len(a.Findings))
-	for _, f := range a.Findings {
-		if seen[f.Reason] {
-			continue
-		}
-		seen[f.Reason] = true
-		codes = append(codes, f.Reason)
-	}
-	sort.Strings(codes)
-	return codes
+	return findingCodes(a.Findings, func(f FSPermFinding) string { return f.Reason })
 }
 
 func (a *ServerFSPermAudit) Describe() string {

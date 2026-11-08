@@ -79,12 +79,7 @@ func (a PlayerPrivacyAudit) Blocking() bool {
 }
 
 func (a PlayerPrivacyAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != ppReasonOK {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f PlayerPrivacyFinding) bool { return !f.Blocking && f.Reason != ppReasonOK })
 }
 
 func (a PlayerPrivacyAudit) Describe() string {

@@ -41,12 +41,7 @@ type AccessControlAudit struct {
 }
 
 func (a AccessControlAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f AccessControlFinding) bool { return f.Blocking })
 }
 
 func (a AccessControlAudit) HasWarnings() bool {

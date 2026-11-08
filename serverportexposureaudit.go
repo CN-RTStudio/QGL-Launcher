@@ -76,12 +76,7 @@ func (a ServerPortAudit) Blocking() bool {
 }
 
 func (a ServerPortAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != pxReasonOK {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f ServerPortFinding) bool { return !f.Blocking && f.Reason != pxReasonOK })
 }
 
 func (a ServerPortAudit) Describe() string {

@@ -5,7 +5,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -66,12 +65,7 @@ func (a *ServerRemoteAudit) Blocking() bool {
 	if a == nil {
 		return false
 	}
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f RemoteFinding) bool { return f.Blocking })
 }
 
 func (a *ServerRemoteAudit) HasWarnings() bool {
@@ -82,17 +76,7 @@ func (a *ServerRemoteAudit) Codes() []string {
 	if a == nil {
 		return nil
 	}
-	seen := make(map[string]struct{}, len(a.Findings))
-	codes := make([]string, 0, len(a.Findings))
-	for _, f := range a.Findings {
-		if _, ok := seen[f.Reason]; ok {
-			continue
-		}
-		seen[f.Reason] = struct{}{}
-		codes = append(codes, f.Reason)
-	}
-	sort.Strings(codes)
-	return codes
+	return findingCodes(a.Findings, func(f RemoteFinding) string { return f.Reason })
 }
 
 func (a *ServerRemoteAudit) Describe() string {

@@ -70,12 +70,7 @@ type EnvHijackAudit struct {
 }
 
 func (a EnvHijackAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f EnvFinding) bool { return f.Blocking })
 }
 
 func (a EnvHijackAudit) HasWarnings() bool {

@@ -1271,20 +1271,6 @@ func (a *App) fixMissingAssets(mcDir string, assetIndexPath string) {
 	}
 }
 
-func mavenNameToURL(name string) string {
-	parts := strings.Split(name, ":")
-	if len(parts) < 3 {
-		return ""
-	}
-	group := strings.ReplaceAll(parts[0], ".", "/")
-	artifact, version := parts[1], parts[2]
-	classifier := ""
-	if len(parts) >= 4 {
-		classifier = "-" + parts[3]
-	}
-	return fmt.Sprintf("https://repo1.maven.org/maven2/%s/%s/%s/%s-%s%s.jar", group, artifact, version, artifact, version, classifier)
-}
-
 // 单个 / 全部 native 条目解压后的体积上限。
 // 正常的 .dll / .so / .jnilib 远小于这些值，上限只在“异常压缩包 / zip 炸弹”时触发，
 // 避免一个恶意 natives jar 借超大条目或高压缩比把磁盘写满。
@@ -1587,10 +1573,6 @@ func generateOfflineUUID(username string) string {
 	hash[6] = (hash[6] & 0x0f) | 0x30
 	hash[8] = (hash[8] & 0x3f) | 0x80
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", hash[0:4], hash[4:6], hash[6:8], hash[8:10], hash[10:16])
-}
-
-func generateRandomToken() string {
-	return generateUMFSToken()
 }
 
 var crashKeywords = []string{

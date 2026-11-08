@@ -60,12 +60,7 @@ func (a AdvancementAudit) Blocking() bool {
 }
 
 func (a AdvancementAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != adReasonOK {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f AdvancementFinding) bool { return !f.Blocking && f.Reason != adReasonOK })
 }
 
 func (a AdvancementAudit) Describe() string {

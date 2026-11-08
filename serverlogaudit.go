@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -57,12 +56,7 @@ func (a *ServerLogAudit) Blocking() bool {
 	if a == nil {
 		return false
 	}
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f LogFinding) bool { return f.Blocking })
 }
 
 func (a *ServerLogAudit) HasWarnings() bool {
@@ -81,17 +75,7 @@ func (a *ServerLogAudit) Codes() []string {
 	if a == nil {
 		return nil
 	}
-	seen := make(map[string]struct{}, len(a.Findings))
-	codes := make([]string, 0, len(a.Findings))
-	for _, f := range a.Findings {
-		if _, ok := seen[f.Reason]; ok {
-			continue
-		}
-		seen[f.Reason] = struct{}{}
-		codes = append(codes, f.Reason)
-	}
-	sort.Strings(codes)
-	return codes
+	return findingCodes(a.Findings, func(f LogFinding) string { return f.Reason })
 }
 
 func (a *ServerLogAudit) Describe() string {

@@ -56,12 +56,7 @@ type JVMAgentAudit struct {
 }
 
 func (a JVMAgentAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f JVMAgentFinding) bool { return f.Blocking })
 }
 
 func (a JVMAgentAudit) HasWarnings() bool {

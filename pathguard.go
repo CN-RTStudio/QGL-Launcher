@@ -16,6 +16,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -39,6 +40,10 @@ func canonicalAbs(p string) (string, error) {
 // PathWithinRoot 做纯词法（不触碰文件系统）的归属判定：child 必须等于 root
 // 或位于 root 之内。两者都会先转成干净绝对路径。
 func PathWithinRoot(child, root string) bool {
+	return pathWithinRootMode(child, root, runtime.GOOS == "windows")
+}
+
+func pathWithinRootMode(child, root string, fold bool) bool {
 	absRoot, err := canonicalAbs(root)
 	if err != nil {
 		return false
@@ -47,10 +52,19 @@ func PathWithinRoot(child, root string) bool {
 	if err != nil {
 		return false
 	}
-	if absChild == absRoot {
+	rootKey := pathCompareKey(absRoot, fold)
+	childKey := pathCompareKey(absChild, fold)
+	if childKey == rootKey {
 		return true
 	}
-	return strings.HasPrefix(absChild, absRoot+string(os.PathSeparator))
+	return strings.HasPrefix(childKey, rootKey+string(os.PathSeparator))
+}
+
+func pathCompareKey(p string, fold bool) string {
+	if fold {
+		return strings.ToLower(p)
+	}
+	return p
 }
 
 // ResolvedPathWithinRoot 先解析 root 与 child 的真实路径（跟随符号链接 /
@@ -64,6 +78,10 @@ func PathWithinRoot(child, root string) bool {
 //
 // 返回归一化后的真实 child 路径（供调用方记录 / 使用）。
 func ResolvedPathWithinRoot(child, root string) (string, bool) {
+	return resolvedPathWithinRootMode(child, root, runtime.GOOS == "windows")
+}
+
+func resolvedPathWithinRootMode(child, root string, fold bool) (string, bool) {
 	realRoot, err := filepath.EvalSymlinks(root)
 	if err != nil {
 		return "", false
@@ -82,10 +100,7 @@ func ResolvedPathWithinRoot(child, root string) (string, bool) {
 		if err != nil {
 			return "", false
 		}
-		if realChild == realRoot {
-			return realChild, true
-		}
-		return realChild, strings.HasPrefix(realChild, realRoot+string(os.PathSeparator))
+		return realChild, pathWithinRootMode(realChild, realRoot, fold)
 	}
 
 	// child 尚不存在：用词法 child 与“已解析的真实父目录”双重确认。
@@ -97,22 +112,20 @@ func ResolvedPathWithinRoot(child, root string) (string, bool) {
 		if e != nil {
 			return "", false
 		}
-		return lexChild, strings.HasPrefix(lexChild, realRoot+string(os.PathSeparator)) ||
-			lexChild == realRoot
+		return lexChild, pathWithinRootMode(lexChild, realRoot, fold)
 	}
 	realParent, err = canonicalAbs(realParent)
 	if err != nil {
 		return "", false
 	}
-	if realParent != realRoot &&
-		!strings.HasPrefix(realParent, realRoot+string(os.PathSeparator)) {
+	if !pathWithinRootMode(realParent, realRoot, fold) {
 		return "", false
 	}
 	lexChild, err := canonicalAbs(child)
 	if err != nil {
 		return "", false
 	}
-	return lexChild, PathWithinRoot(lexChild, realRoot)
+	return lexChild, pathWithinRootMode(lexChild, realRoot, fold)
 }
 
 // safeRelChar 是外部清单里“相对路径单段”允许出现的字符白名单。

@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 )
 
@@ -49,26 +48,11 @@ func (a BanListAudit) Blocking() bool {
 }
 
 func (a BanListAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != banReasonOK {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f BanFinding) bool { return !f.Blocking && f.Reason != banReasonOK })
 }
 
 func (a BanListAudit) Codes() []string {
-	seen := map[string]bool{}
-	codes := []string{}
-	for _, f := range a.Findings {
-		if f.Reason == banReasonOK || seen[f.Reason] {
-			continue
-		}
-		seen[f.Reason] = true
-		codes = append(codes, f.Reason)
-	}
-	sort.Strings(codes)
-	return codes
+	return findingCodesSkip(a.Findings, banReasonOK, func(f BanFinding) string { return f.Reason })
 }
 
 func (a BanListAudit) Describe() string {

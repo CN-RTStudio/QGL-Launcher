@@ -29,6 +29,11 @@ func (a *App) DownloadVersion(versionID string, versionURL string, customName st
 	}
 	a.emitProgress("downloading", customName+".json", 0, 0)
 	jsonURL := rewriteLauncherURLToBMCL(versionURL)
+	if !urlOnTrustedHost(jsonURL, allowedVersionMetaHosts) {
+		recordSecurityEvent(auditCategoryExternalURL, auditSeverityCritical, auditActionBlocked,
+			"version-manifest", "版本清单地址不在可信元数据主机白名单内")
+		return fmt.Errorf("版本清单地址不在可信元数据主机白名单内")
+	}
 	jsonPath := filepath.Join(versionDir, customName+".json")
 	if err := a.downloadFileBounded(jsonURL, jsonPath, false, maxMetadataJSONBytes); err != nil {
 		return fmt.Errorf("下载版本 JSON 失败: %v", err)

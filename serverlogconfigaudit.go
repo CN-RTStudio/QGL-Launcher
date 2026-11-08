@@ -85,12 +85,7 @@ type LogConfigAudit struct {
 }
 
 func (a LogConfigAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f LogConfigFinding) bool { return f.Blocking })
 }
 
 func (a LogConfigAudit) HasWarnings() bool {

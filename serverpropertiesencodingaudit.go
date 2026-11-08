@@ -46,16 +46,11 @@ func (a *PropertiesEncodingAudit) add(file, reason, detail string, blocking bool
 }
 
 func (a *PropertiesEncodingAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f PropertiesEncodingFinding) bool { return f.Blocking })
 }
 
 func (a *PropertiesEncodingAudit) HasWarnings() bool {
-	return len(a.Findings) > 0
+	return hasAny(a.Findings)
 }
 
 func (a *PropertiesEncodingAudit) Describe() string {

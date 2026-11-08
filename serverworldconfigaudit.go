@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -57,34 +56,16 @@ func (a *WorldConfigAudit) HasWarnings() bool {
 }
 
 func (a *WorldConfigAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return "世界与实体范围配置处于安全区间"
-	}
-	sorted := make([]WorldConfigFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Reason != sorted[j].Reason {
-			return sorted[i].Reason < sorted[j].Reason
-		}
-		return sorted[i].Detail < sorted[j].Detail
-	})
-	var b strings.Builder
-	for i, f := range sorted {
-		if i >= 10 {
-			b.WriteString(fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		if i > 0 {
-			b.WriteString("；")
-		}
-		b.WriteString(f.Reason)
-		if f.Detail != "" {
-			b.WriteString("(")
-			b.WriteString(f.Detail)
-			b.WriteString(")")
-		}
-	}
-	return b.String()
+	return describeAuditFindings("世界与实体范围配置处于安全区间", a.Findings, 10,
+		func(f WorldConfigFinding) []string {
+			return []string{f.Reason, f.Detail}
+		},
+		func(f WorldConfigFinding) string {
+			if f.Detail == "" {
+				return f.Reason
+			}
+			return f.Reason + "(" + f.Detail + ")"
+		})
 }
 
 func swpReadProps(serverDir string, a *WorldConfigAudit) (map[string]string, bool) {

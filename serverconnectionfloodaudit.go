@@ -1,10 +1,8 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
@@ -70,24 +68,7 @@ func (a *ConnectionFloodAudit) Describe() string {
 }
 
 func cfdLoad(a *ConnectionFloodAudit, root, rel string, maxBytes int64) (string, bool) {
-	path := filepath.Join(root, rel)
-	if sym, serr := isSymlinkOrSpecial(path); serr == nil && sym {
-		a.add(rel, cfdReasonSymlink, "配置文件为符号链接或特殊文件", true)
-		return "", false
-	}
-	data, err := readBoundedFile(path, maxBytes)
-	if err != nil {
-		if _, serr := os.Lstat(path); serr != nil {
-			return "", false
-		}
-		if errors.Is(err, errLocalFileTooLarge) {
-			a.add(rel, cfdReasonTooLarge, fmt.Sprintf("配置文件超过 %d 字节", maxBytes), true)
-			return "", false
-		}
-		a.add(rel, cfdReasonUnreadable, "配置文件不可读", false)
-		return "", false
-	}
-	return string(data), true
+	return loadServerText(root, rel, maxBytes, a.add)
 }
 
 func cfdIntField(a *ConnectionFloodAudit, file, label, value string) (int, bool) {

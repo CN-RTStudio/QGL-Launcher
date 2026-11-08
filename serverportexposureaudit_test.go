@@ -141,7 +141,7 @@ func TestAuditServerPortsProxyBypass(t *testing.T) {
 	}
 }
 
-func TestpxParsePort(t *testing.T) {
+func TestPxParsePort(t *testing.T) {
 	if port, ok := pxParsePort("25565"); !ok || port != 25565 {
 		t.Fatalf("正常端口解析失败")
 	}

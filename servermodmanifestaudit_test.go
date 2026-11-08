@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func writeTestJar(t *testing.T, dir, name string, entries map[string]string) string {
+func writeModJarFixture(t *testing.T, dir, name string, entries map[string]string) string {
 	t.Helper()
 	target := filepath.Join(dir, name)
 	file, err := os.Create(target)
@@ -40,7 +40,7 @@ func TestAuditServerModManifestClean(t *testing.T) {
 	if err := os.Mkdir(mods, 0o700); err != nil {
 		t.Fatalf("创建 mods 失败: %v", err)
 	}
-	writeTestJar(t, mods, "sodium.jar", map[string]string{
+	writeModJarFixture(t, mods, "sodium.jar", map[string]string{
 		"fabric.mod.json": `{"id":"sodium","version":"1.0"}`,
 		"assets/a.txt":    "ok",
 	})
@@ -58,7 +58,7 @@ func TestAuditServerModManifestClean(t *testing.T) {
 
 func TestAuditServerModManifestSuspiciousEntry(t *testing.T) {
 	mods := t.TempDir()
-	writeTestJar(t, mods, "evil.jar", map[string]string{
+	writeModJarFixture(t, mods, "evil.jar", map[string]string{
 		"../../startup.jar": "x",
 	})
 	audit, err := AuditServerModManifest(mods)
@@ -73,8 +73,8 @@ func TestAuditServerModManifestSuspiciousEntry(t *testing.T) {
 func TestAuditServerModManifestDuplicateModID(t *testing.T) {
 	mods := t.TempDir()
 	body := `{"id":"sameid"}`
-	writeTestJar(t, mods, "a.jar", map[string]string{"fabric.mod.json": body})
-	writeTestJar(t, mods, "b.jar", map[string]string{"fabric.mod.json": body})
+	writeModJarFixture(t, mods, "a.jar", map[string]string{"fabric.mod.json": body})
+	writeModJarFixture(t, mods, "b.jar", map[string]string{"fabric.mod.json": body})
 	audit, err := AuditServerModManifest(mods)
 	if err != nil {
 		t.Fatalf("审计失败: %v", err)
@@ -108,7 +108,7 @@ func TestAuditServerModManifestBadZip(t *testing.T) {
 func TestAuditServerModManifestSymlink(t *testing.T) {
 	mods := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "outside.jar")
-	writeTestJar(t, filepath.Dir(outside), "outside.jar", map[string]string{"a.txt": "x"})
+	writeModJarFixture(t, filepath.Dir(outside), "outside.jar", map[string]string{"a.txt": "x"})
 	if err := os.Symlink(outside, filepath.Join(mods, "linked.jar")); err != nil {
 		t.Skipf("创建符号链接失败: %v", err)
 	}

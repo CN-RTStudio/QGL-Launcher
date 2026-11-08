@@ -74,12 +74,7 @@ type CommandAliasAudit struct {
 }
 
 func (a CommandAliasAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f CommandAliasFinding) bool { return f.Blocking })
 }
 
 func (a CommandAliasAudit) HasWarnings() bool {

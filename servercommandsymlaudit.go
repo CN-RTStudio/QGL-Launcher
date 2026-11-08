@@ -130,15 +130,7 @@ func scyCollectAliases(text string) []commandsYmlBlock {
 }
 
 func scyHasControlChars(text string) bool {
-	for _, r := range text {
-		if r == '\t' || r == '\n' || r == '\r' {
-			continue
-		}
-		if r < 0x20 || r == 0x7f {
-			return true
-		}
-	}
-	return false
+	return hasControlCharsText(text)
 }
 
 func AuditServerCommandsYml(serverDir string) *CommandsYmlAudit {

@@ -217,6 +217,14 @@ func ParseHostPort(addr string) (*HostPort, string) {
 		}
 	}
 
+	for i := 0; i < len(portStr); i++ {
+		if portStr[i] < '0' || portStr[i] > '9' {
+			return nil, addrRejectBadPort
+		}
+	}
+	if len(portStr) > 1 && portStr[0] == '0' {
+		return nil, addrRejectBadPort
+	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil || portStr == "" {
 		return nil, addrRejectBadPort

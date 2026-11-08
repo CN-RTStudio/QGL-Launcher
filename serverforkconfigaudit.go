@@ -56,12 +56,7 @@ func (a ForkConfigAudit) Blocking() bool {
 }
 
 func (a ForkConfigAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != fkReasonOK {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f ForkConfigFinding) bool { return !f.Blocking && f.Reason != fkReasonOK })
 }
 
 func (a ForkConfigAudit) Describe() string {

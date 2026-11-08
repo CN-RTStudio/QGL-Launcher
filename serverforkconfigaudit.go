@@ -55,12 +55,7 @@ type ForkConfigAudit struct {
 }
 
 func (a ForkConfigAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f ForkConfigFinding) bool { return f.Blocking })
 }
 
 func (a ForkConfigAudit) HasWarnings() bool {

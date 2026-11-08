@@ -43,16 +43,11 @@ func (a *CrashReportHygieneAudit) add(file, reason, detail string, blocking bool
 }
 
 func (a *CrashReportHygieneAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f CrashReportHygieneFinding) bool { return f.Blocking })
 }
 
 func (a *CrashReportHygieneAudit) HasWarnings() bool {
-	return len(a.Findings) > 0
+	return hasAny(a.Findings)
 }
 
 func (a *CrashReportHygieneAudit) Describe() string {

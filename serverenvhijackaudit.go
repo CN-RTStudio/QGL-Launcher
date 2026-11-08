@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 )
 
@@ -72,26 +71,11 @@ func (a EnvHijackAudit) Blocking() bool {
 }
 
 func (a EnvHijackAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != envReasonOK {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f EnvFinding) bool { return !f.Blocking && f.Reason != envReasonOK })
 }
 
 func (a EnvHijackAudit) Codes() []string {
-	seen := map[string]bool{}
-	codes := []string{}
-	for _, f := range a.Findings {
-		if f.Reason == envReasonOK || seen[f.Reason] {
-			continue
-		}
-		seen[f.Reason] = true
-		codes = append(codes, f.Reason)
-	}
-	sort.Strings(codes)
-	return codes
+	return findingCodesSkip(a.Findings, envReasonOK, func(f EnvFinding) string { return f.Reason })
 }
 
 func (a EnvHijackAudit) Describe() string {

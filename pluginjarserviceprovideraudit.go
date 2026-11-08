@@ -4,8 +4,6 @@ import (
 	"archive/zip"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -119,65 +117,14 @@ func pjpProviderPresent(classes map[string]bool, provider string) bool {
 
 func AuditPluginServiceProviders(serverDir string) *PjpAudit {
 	a := &PjpAudit{ServerDir: serverDir}
-	if serverDir == "" {
-		a.add("plugins", "", pjpMiss, "未配置服务器目录", false)
-		return a
-	}
-
-	dir := filepath.Join(serverDir, "plugins")
-	info, err := os.Stat(dir)
-	if err != nil || !info.IsDir() {
-		a.add("plugins", "", pjpMiss, "缺少插件目录", false)
-		return a
-	}
-	link, err := isSymlinkOrSpecial(dir)
-	if err != nil {
-		a.add("plugins", "", pjpRead, err.Error(), true)
-		return a
-	}
-	if link {
-		a.add("plugins", "", pjpLink, "插件目录是符号链接或特殊文件", true)
-		return a
-	}
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		a.add("plugins", "", pjpRead, "无法读取插件目录", true)
-		return a
-	}
-
-	for _, entry := range entries {
-		name := entry.Name()
-		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(name), ".jar") {
-			continue
-		}
-		a.Jars++
-		path := filepath.Join(dir, name)
-		link, err := isSymlinkOrSpecial(path)
-		if err != nil {
-			a.add(name, "", pjpJarOpen, err.Error(), true)
-			continue
-		}
-		if link {
-			a.add(name, "", pjpJarLink, "jar 是符号链接或特殊文件", true)
-			continue
-		}
-		info, err := os.Stat(path)
-		if err != nil {
-			a.add(name, "", pjpJarOpen, "jar 无法访问", true)
-			continue
-		}
-		if info.Size() > pjpMaxJarSize {
-			a.add(name, "", pjpJarSize, fmt.Sprintf("jar %d 字节超过上限", info.Size()), false)
-			continue
-		}
-
-		archive, err := zip.OpenReader(path)
-		if err != nil {
-			a.add(name, "", pjpJarOpen, "jar 不是合法 zip", true)
-			continue
-		}
-
+	walk := walkPluginJars(serverDir, pjpMaxJarSize, pluginJarWalkReasons{
+		Missing: pjpMiss,
+		Read:    pjpRead,
+		DirLink: pjpLink,
+		JarLink: pjpJarLink,
+		JarOpen: pjpJarOpen,
+		JarSize: pjpJarSize,
+	}, func(name string, archive *zip.ReadCloser) {
 		classes := pjpClassNameSet(archive.File)
 		for _, file := range archive.File {
 			if a.Services >= pjpMaxServices {
@@ -248,9 +195,11 @@ func AuditPluginServiceProviders(serverDir string) *PjpAudit {
 				a.add(name, entryName, pjpEmpty, "服务文件没有声明任何提供者", false)
 			}
 		}
-		archive.Close()
+	})
+	a.Jars = walk.Jars
+	for _, issue := range walk.Issues {
+		a.add(issue.Jar, issue.Entry, issue.Reason, issue.Detail, issue.Blocking)
 	}
-
 	if a.Jars > pjpMaxJars {
 		a.add("plugins", "", pjpJarSize, fmt.Sprintf("jar 数量 %d 超过上限", a.Jars), false)
 	}

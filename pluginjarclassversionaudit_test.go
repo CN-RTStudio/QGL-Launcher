@@ -61,7 +61,7 @@ func pjvHas(a *PjvAudit, reason string) bool {
 	return false
 }
 
-func TestPluginClassClean(t *testing.T) {
+func TestPluginJarClassClean(t *testing.T) {
 	root, dir := pjvRoot(t)
 	pjvJar(t, dir, "a.jar", map[string][]byte{
 		"com/x/A.class":        pjvClass(52),
@@ -112,21 +112,21 @@ func TestPluginClassShortHeader(t *testing.T) {
 	}
 }
 
-func TestPluginClassMissingDir(t *testing.T) {
+func TestPluginJarClassMissingDir(t *testing.T) {
 	a := AuditPluginClassVersion(t.TempDir())
 	if !pjvHas(a, pjvMiss) {
 		t.Fatalf("缺少目录应提示: %v", a.Describe())
 	}
 }
 
-func TestPluginClassEmptyArg(t *testing.T) {
+func TestPluginJarClassEmptyArg(t *testing.T) {
 	a := AuditPluginClassVersion("")
 	if !pjvHas(a, pjvMiss) {
 		t.Fatalf("空参数应提示: %v", a.Describe())
 	}
 }
 
-func TestPluginClassBrokenJar(t *testing.T) {
+func TestPluginJarClassBrokenJar(t *testing.T) {
 	root, dir := pjvRoot(t)
 	if err := os.WriteFile(filepath.Join(dir, "bad.jar"), []byte("nope"), 0o644); err != nil {
 		t.Fatalf("write: %v", err)
@@ -137,7 +137,7 @@ func TestPluginClassBrokenJar(t *testing.T) {
 	}
 }
 
-func TestPluginClassDescribe(t *testing.T) {
+func TestPluginJarClassDescribe(t *testing.T) {
 	root, dir := pjvRoot(t)
 	pjvJar(t, dir, "a.jar", map[string][]byte{"com/x/A.class": pjvClass(69)})
 	if AuditPluginClassVersion(root).Describe() == "" {

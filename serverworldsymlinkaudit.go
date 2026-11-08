@@ -1,10 +1,8 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -59,34 +57,16 @@ func (a *WorldSymlinkAudit) HasWarnings() bool {
 }
 
 func (a *WorldSymlinkAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return "世界存档目录未发现符号链接风险"
-	}
-	sorted := make([]WorldSymlinkFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Reason != sorted[j].Reason {
-			return sorted[i].Reason < sorted[j].Reason
-		}
-		return sorted[i].Path < sorted[j].Path
-	})
-	var b strings.Builder
-	for i, f := range sorted {
-		if i >= 12 {
-			b.WriteString(fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		if i > 0 {
-			b.WriteString("；")
-		}
-		b.WriteString(f.Reason)
-		if f.Path != "" {
-			b.WriteString("(")
-			b.WriteString(f.Path)
-			b.WriteString(")")
-		}
-	}
-	return b.String()
+	return describeAuditFindings("世界存档目录未发现符号链接风险", a.Findings, 12,
+		func(f WorldSymlinkFinding) []string {
+			return []string{f.Reason, f.Path}
+		},
+		func(f WorldSymlinkFinding) string {
+			if f.Detail == "" {
+				return f.Reason
+			}
+			return f.Reason + "(" + f.Detail + ")"
+		})
 }
 
 func sytWithinRoot(root, target string) bool {

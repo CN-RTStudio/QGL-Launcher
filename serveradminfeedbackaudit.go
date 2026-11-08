@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -58,34 +57,16 @@ func (a *AdminFeedbackAudit) HasWarnings() bool {
 }
 
 func (a *AdminFeedbackAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return "管理员反馈与权限档位未发现风险配置"
-	}
-	sorted := make([]AdminFeedbackFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Reason != sorted[j].Reason {
-			return sorted[i].Reason < sorted[j].Reason
-		}
-		return sorted[i].Detail < sorted[j].Detail
-	})
-	var b strings.Builder
-	for i, f := range sorted {
-		if i >= 10 {
-			b.WriteString(fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		if i > 0 {
-			b.WriteString("；")
-		}
-		b.WriteString(f.Reason)
-		if f.Detail != "" {
-			b.WriteString("(")
-			b.WriteString(f.Detail)
-			b.WriteString(")")
-		}
-	}
-	return b.String()
+	return describeAuditFindings("管理员反馈与权限档位未发现风险配置", a.Findings, 10,
+		func(f AdminFeedbackFinding) []string {
+			return []string{f.Reason, f.Detail}
+		},
+		func(f AdminFeedbackFinding) string {
+			if f.Detail == "" {
+				return f.Reason
+			}
+			return f.Reason + "(" + f.Detail + ")"
+		})
 }
 
 func sfaReadProps(serverDir string, a *AdminFeedbackAudit) (map[string]string, bool) {

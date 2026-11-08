@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -58,34 +57,16 @@ func (a *RconHardeningAudit) HasWarnings() bool {
 }
 
 func (a *RconHardeningAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return "RCON 配置未发现风险"
-	}
-	sorted := make([]RconHardeningFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Reason != sorted[j].Reason {
-			return sorted[i].Reason < sorted[j].Reason
-		}
-		return sorted[i].Detail < sorted[j].Detail
-	})
-	var b strings.Builder
-	for i, f := range sorted {
-		if i >= 10 {
-			b.WriteString(fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		if i > 0 {
-			b.WriteString("；")
-		}
-		b.WriteString(f.Reason)
-		if f.Detail != "" {
-			b.WriteString("(")
-			b.WriteString(f.Detail)
-			b.WriteString(")")
-		}
-	}
-	return b.String()
+	return describeAuditFindings("RCON 配置未发现风险", a.Findings, 10,
+		func(f RconHardeningFinding) []string {
+			return []string{f.Reason, f.Detail}
+		},
+		func(f RconHardeningFinding) string {
+			if f.Detail == "" {
+				return f.Reason
+			}
+			return f.Reason + "(" + f.Detail + ")"
+		})
 }
 
 func syrPasswordVariety(password string) int {
@@ -168,8 +149,8 @@ func AuditServerRconHardening(serverDir string) *RconHardeningAudit {
 	}
 	rconPort := syrDefaultPort
 	if raw, ok := props["rcon.port"]; ok {
-		value, bad := cfgParseInt(raw)
-		if bad || value < 1 || value > 65535 {
+		value, parsed := cfgParseInt(raw)
+		if !parsed || value < 1 || value > 65535 {
 			a.add(syrRCONPortBad, "rcon.port 不是合法端口", true)
 		} else {
 			rconPort = value
@@ -177,7 +158,7 @@ func AuditServerRconHardening(serverDir string) *RconHardeningAudit {
 	}
 	serverPort := 25565
 	if raw, ok := props["server-port"]; ok {
-		if value, bad := cfgParseInt(raw); !bad && value >= 1 && value <= 65535 {
+		if value, parsed := cfgParseInt(raw); parsed && value >= 1 && value <= 65535 {
 			serverPort = value
 		}
 	}
@@ -191,7 +172,7 @@ func AuditServerRconHardening(serverDir string) *RconHardeningAudit {
 		a.add(syrQueryEnabled, "Query 协议已开启，会额外暴露服务器信息", false)
 		queryPort := 25565
 		if raw, ok := props["query.port"]; ok {
-			if value, bad := cfgParseInt(raw); !bad && value >= 1 && value <= 65535 {
+			if value, parsed := cfgParseInt(raw); parsed && value >= 1 && value <= 65535 {
 				queryPort = value
 			}
 		}

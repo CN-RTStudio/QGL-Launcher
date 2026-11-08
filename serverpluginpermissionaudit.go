@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 )
 
@@ -52,26 +51,11 @@ func (a PluginPermissionAudit) Blocking() bool {
 }
 
 func (a PluginPermissionAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != plugPermReasonOK {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f PluginPermFinding) bool { return !f.Blocking && f.Reason != plugPermReasonOK })
 }
 
 func (a PluginPermissionAudit) Codes() []string {
-	seen := map[string]bool{}
-	codes := []string{}
-	for _, f := range a.Findings {
-		if f.Reason == plugPermReasonOK || seen[f.Reason] {
-			continue
-		}
-		seen[f.Reason] = true
-		codes = append(codes, f.Reason)
-	}
-	sort.Strings(codes)
-	return codes
+	return findingCodesSkip(a.Findings, plugPermReasonOK, func(f PluginPermFinding) string { return f.Reason })
 }
 
 func (a PluginPermissionAudit) Describe() string {

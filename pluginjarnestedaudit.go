@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -60,26 +59,13 @@ func (a *PjnAudit) HasWarnings() bool {
 }
 
 func (a *PjnAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return fmt.Sprintf("插件归档无嵌套包，共 %d 个 jar", a.Jars)
-	}
-	sorted := make([]PjnFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Reason != sorted[j].Reason {
-			return sorted[i].Reason < sorted[j].Reason
-		}
-		return sorted[i].Entry < sorted[j].Entry
-	})
-	parts := make([]string, 0, len(sorted))
-	for i, f := range sorted {
-		if i >= 8 {
-			parts = append(parts, fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		parts = append(parts, f.Reason)
-	}
-	return strings.Join(parts, "；")
+	return describeAuditFindings(fmt.Sprintf("插件归档无嵌套包，共 %d 个 jar", a.Jars), a.Findings, 8,
+		func(f PjnFinding) []string {
+			return []string{f.Reason, f.Entry}
+		},
+		func(f PjnFinding) string {
+			return f.Reason
+		})
 }
 
 func pjnNestedEntry(name string) bool {

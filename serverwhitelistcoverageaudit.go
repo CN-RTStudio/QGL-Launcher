@@ -69,17 +69,7 @@ type swcEntry struct {
 }
 
 func swcBool(props map[string]string, key string) (bool, bool) {
-	raw, ok := props[key]
-	if !ok {
-		return false, false
-	}
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "true", "on", "yes":
-		return true, true
-	case "false", "off", "no":
-		return false, true
-	}
-	return false, false
+	return propsBoolValue(props, key)
 }
 
 func swcLoadEntries(serverDir string, a *WhitelistCoverageAudit) ([]swcEntry, bool) {

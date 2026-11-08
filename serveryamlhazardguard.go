@@ -67,12 +67,7 @@ func (a YamlHazardAudit) Blocking() bool {
 }
 
 func (a YamlHazardAudit) HasWarnings() bool {
-	for _, f := range a.Findings {
-		if !f.Blocking && f.Reason != yhReasonOK {
-			return true
-		}
-	}
-	return false
+	return auditHasWarning(a.Findings, func(f YamlHazardFinding) bool { return !f.Blocking && f.Reason != yhReasonOK })
 }
 
 func (a YamlHazardAudit) Describe() string {

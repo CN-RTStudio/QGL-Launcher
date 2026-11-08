@@ -35,12 +35,7 @@ type DatapackAudit struct {
 }
 
 func (audit DatapackAudit) Blocking() bool {
-	for _, finding := range audit.Findings {
-		if finding.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(audit.Findings, func(f DatapackFinding) bool { return f.Blocking })
 }
 
 func (audit DatapackAudit) Describe() string {

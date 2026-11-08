@@ -96,17 +96,7 @@ func snmReadProps(serverDir string, a *OnlineModeAudit) (map[string]string, bool
 }
 
 func snmBool(props map[string]string, key string) (bool, bool) {
-	raw, ok := props[key]
-	if !ok {
-		return false, false
-	}
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "true", "on", "yes":
-		return true, true
-	case "false", "off", "no":
-		return false, true
-	}
-	return false, false
+	return propsBoolValue(props, key)
 }
 
 func AuditServerOnlineMode(serverDir string) *OnlineModeAudit {

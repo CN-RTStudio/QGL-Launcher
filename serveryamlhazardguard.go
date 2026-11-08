@@ -65,12 +65,7 @@ type YamlHazardAudit struct {
 }
 
 func (a YamlHazardAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f YamlHazardFinding) bool { return f.Blocking })
 }
 
 func (a YamlHazardAudit) HasWarnings() bool {

@@ -179,7 +179,7 @@ func auditStraySecretFile(audit *ServerStraySecretAudit, path, display string) {
 		audit.Findings = append(audit.Findings, StraySecretFinding{Path: display, Reason: strayReasonTooLarge, Detail: fmt.Sprintf("%d 字节超过扫描上限", info.Size())})
 		return
 	}
-	data, err := os.ReadFile(path)
+	data, err := readBoundedFile(path, auditTextReadMaxBytes)
 	if err != nil {
 		audit.Findings = append(audit.Findings, StraySecretFinding{Path: display, Reason: strayReasonUnreadable, Detail: "文件不可读"})
 		return

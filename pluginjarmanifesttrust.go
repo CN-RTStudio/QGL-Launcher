@@ -4,7 +4,6 @@ import (
 	"archive/zip"
 	"fmt"
 	"io"
-	"sort"
 	"strings"
 )
 
@@ -63,26 +62,13 @@ func (a *PjmAudit) HasWarnings() bool {
 }
 
 func (a *PjmAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return fmt.Sprintf("插件清单属性未发现自动加载或外部类路径，%d 个 jar，%d 份清单", a.Jars, a.Manifests)
-	}
-	sorted := make([]PjmFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Reason != sorted[j].Reason {
-			return sorted[i].Reason < sorted[j].Reason
-		}
-		return sorted[i].Entry < sorted[j].Entry
-	})
-	parts := make([]string, 0, len(sorted))
-	for i, f := range sorted {
-		if i >= 8 {
-			parts = append(parts, fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		parts = append(parts, f.Reason)
-	}
-	return strings.Join(parts, "；")
+	return describeAuditFindings(fmt.Sprintf("插件清单属性未发现自动加载或外部类路径，%d 个 jar，%d 份清单", a.Jars, a.Manifests), a.Findings, 8,
+		func(f PjmFinding) []string {
+			return []string{f.Reason, f.Entry}
+		},
+		func(f PjmFinding) string {
+			return f.Reason
+		})
 }
 
 func pjmUnfold(raw string) map[string]string {

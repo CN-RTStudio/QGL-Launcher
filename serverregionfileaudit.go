@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -61,26 +60,13 @@ func (a *RgnFileAudit) HasWarnings() bool {
 }
 
 func (a *RgnFileAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return fmt.Sprintf("region 目录通过检查，共 %d 个区域文件", a.Files)
-	}
-	sorted := make([]RgnFileFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Reason != sorted[j].Reason {
-			return sorted[i].Reason < sorted[j].Reason
-		}
-		return sorted[i].File < sorted[j].File
-	})
-	parts := make([]string, 0, len(sorted))
-	for i, f := range sorted {
-		if i >= 8 {
-			parts = append(parts, fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		parts = append(parts, f.Reason)
-	}
-	return strings.Join(parts, "；")
+	return describeAuditFindings(fmt.Sprintf("region 目录通过检查，共 %d 个区域文件", a.Files), a.Findings, 8,
+		func(f RgnFileFinding) []string {
+			return []string{f.Reason, f.File}
+		},
+		func(f RgnFileFinding) string {
+			return f.Reason
+		})
 }
 
 func rgnHeaderFlags(path string) (int, error) {

@@ -821,322 +821,322 @@ func (a *App) StartServer(name string) error {
 
 	playerPrivacyAudit := AuditServerPlayerPrivacy(cfg.ServerDir)
 	if playerPrivacyAudit.Blocking() {
-		a.writeLog("security", "玩家身份数据审计阻断启动: "+playerPrivacyAudit.Describe())
+		a.writeSecurityLog("玩家身份数据审计阻断启动: " + playerPrivacyAudit.Describe())
 		return fmt.Errorf("玩家身份数据未通过安全校验: %s", playerPrivacyAudit.Describe())
 	}
 	forkConfigAudit := AuditServerForkConfig(cfg.ServerDir)
 	if forkConfigAudit.Blocking() {
-		a.writeLog("security", "分支配置审计阻断启动: "+forkConfigAudit.Describe())
+		a.writeSecurityLog("分支配置审计阻断启动: " + forkConfigAudit.Describe())
 		return fmt.Errorf("分支配置未通过安全校验: %s", forkConfigAudit.Describe())
 	}
 	yamlHazardAudit := AuditServerYamlHazards(cfg.ServerDir)
 	if yamlHazardAudit.Blocking() {
-		a.writeLog("security", "YAML 构造审计阻断启动: "+yamlHazardAudit.Describe())
+		a.writeSecurityLog("YAML 构造审计阻断启动: " + yamlHazardAudit.Describe())
 		return fmt.Errorf("YAML 配置未通过安全校验: %s", yamlHazardAudit.Describe())
 	}
 	permissionConfigAudit := AuditServerPermissionConfig(cfg.ServerDir)
 	if permissionConfigAudit.Blocking() {
-		a.writeLog("security", "权限配置审计阻断启动: "+permissionConfigAudit.Describe())
+		a.writeSecurityLog("权限配置审计阻断启动: " + permissionConfigAudit.Describe())
 		return fmt.Errorf("权限配置未通过安全校验: %s", permissionConfigAudit.Describe())
 	}
 	startupSecretAudit := AuditServerStartupSecrets(cfg.ServerDir)
 	if startupSecretAudit.Blocking() {
-		a.writeLog("security", "启动脚本凭据审计阻断启动: "+startupSecretAudit.Describe())
+		a.writeSecurityLog("启动脚本凭据审计阻断启动: " + startupSecretAudit.Describe())
 		return fmt.Errorf("启动脚本凭据未通过安全校验: %s", startupSecretAudit.Describe())
 	}
 	commandAliasAudit := AuditServerCommandAliases(cfg.ServerDir)
 	if commandAliasAudit.Blocking() {
-		a.writeLog("security", "命令别名审计阻断启动: "+commandAliasAudit.Describe())
+		a.writeSecurityLog("命令别名审计阻断启动: " + commandAliasAudit.Describe())
 		return fmt.Errorf("命令别名未通过安全校验: %s", commandAliasAudit.Describe())
 	}
 	helpOverrideAudit := AuditServerHelpOverride(cfg.ServerDir)
 	if helpOverrideAudit.Blocking() {
-		a.writeLog("security", "帮助覆盖审计阻断启动: "+helpOverrideAudit.Describe())
+		a.writeSecurityLog("帮助覆盖审计阻断启动: " + helpOverrideAudit.Describe())
 		return fmt.Errorf("帮助覆盖未通过安全校验: %s", helpOverrideAudit.Describe())
 	}
 	statsAudit := AuditServerStats(cfg.ServerDir)
 	if statsAudit.Blocking() {
-		a.writeLog("security", "玩家统计审计阻断启动: "+statsAudit.Describe())
+		a.writeSecurityLog("玩家统计审计阻断启动: " + statsAudit.Describe())
 		return fmt.Errorf("玩家统计未通过安全校验: %s", statsAudit.Describe())
 	}
 	advancementAudit := AuditServerAdvancements(cfg.ServerDir)
 	if advancementAudit.Blocking() {
-		a.writeLog("security", "进度数据审计阻断启动: "+advancementAudit.Describe())
+		a.writeSecurityLog("进度数据审计阻断启动: " + advancementAudit.Describe())
 		return fmt.Errorf("进度数据未通过安全校验: %s", advancementAudit.Describe())
 	}
 	dataPackFilterAudit := AuditServerDataPackFilters(cfg.ServerDir)
 	if dataPackFilterAudit.Blocking() {
-		a.writeLog("security", "数据包过滤审计阻断启动: "+dataPackFilterAudit.Describe())
+		a.writeSecurityLog("数据包过滤审计阻断启动: " + dataPackFilterAudit.Describe())
 		return fmt.Errorf("数据包过滤未通过安全校验: %s", dataPackFilterAudit.Describe())
 	}
 	log4jAudit := AuditServerLog4jShell(cfg.ServerDir)
 	if log4jAudit.Blocking() {
-		a.writeLog("security", "log4j 组件审计阻断启动: "+log4jAudit.Describe())
+		a.writeSecurityLog("log4j 组件审计阻断启动: " + log4jAudit.Describe())
 		return fmt.Errorf("log4j 组件未通过安全校验: %s", log4jAudit.Describe())
 	}
 	proxyForwardAudit := AuditServerProxyForwarding(cfg.ServerDir)
 	if proxyForwardAudit.Blocking() {
-		a.writeLog("security", "代理转发审计阻断启动: "+proxyForwardAudit.Describe())
+		a.writeSecurityLog("代理转发审计阻断启动: " + proxyForwardAudit.Describe())
 		return fmt.Errorf("代理转发配置未通过安全校验: %s", proxyForwardAudit.Describe())
 	}
 	connectionFloodAudit := AuditServerConnectionFlood(cfg.ServerDir)
 	if connectionFloodAudit.Blocking() {
-		a.writeLog("security", "连接洪泛审计阻断启动: "+connectionFloodAudit.Describe())
+		a.writeSecurityLog("连接洪泛审计阻断启动: " + connectionFloodAudit.Describe())
 		return fmt.Errorf("连接节流配置未通过安全校验: %s", connectionFloodAudit.Describe())
 	}
 	packetLimiterAudit := AuditServerPacketLimiter(cfg.ServerDir)
 	if packetLimiterAudit.Blocking() {
-		a.writeLog("security", "数据包限速审计阻断启动: "+packetLimiterAudit.Describe())
+		a.writeSecurityLog("数据包限速审计阻断启动: " + packetLimiterAudit.Describe())
 		return fmt.Errorf("数据包限速配置未通过安全校验: %s", packetLimiterAudit.Describe())
 	}
 	propertiesBudgetAudit := AuditServerPropertiesBudget(cfg.ServerDir)
 	if propertiesBudgetAudit.Blocking() {
-		a.writeLog("security", "服务端属性预算审计阻断启动: "+propertiesBudgetAudit.Describe())
+		a.writeSecurityLog("服务端属性预算审计阻断启动: " + propertiesBudgetAudit.Describe())
 		return fmt.Errorf("服务端属性未通过安全校验: %s", propertiesBudgetAudit.Describe())
 	}
 	modJarAudit := AuditModJarManifests(cfg.ServerDir)
 	if modJarAudit.Blocking() {
-		a.writeLog("security", "模组清单审计阻断启动: "+modJarAudit.Describe())
+		a.writeSecurityLog("模组清单审计阻断启动: " + modJarAudit.Describe())
 		return fmt.Errorf("模组清单未通过安全校验: %s", modJarAudit.Describe())
 	}
 	pluginJarEntryAudit := AuditPluginJarEntries(cfg.ServerDir)
 	if pluginJarEntryAudit.Blocking() {
-		a.writeLog("security", "插件归档审计阻断启动: "+pluginJarEntryAudit.Describe())
+		a.writeSecurityLog("插件归档审计阻断启动: " + pluginJarEntryAudit.Describe())
 		return fmt.Errorf("插件归档未通过安全校验: %s", pluginJarEntryAudit.Describe())
 	}
 	commandBlockAudit := AuditServerCommandBlocks(cfg.ServerDir)
 	if commandBlockAudit.Blocking() {
-		a.writeLog("security", "命令方块审计阻断启动: "+commandBlockAudit.Describe())
+		a.writeSecurityLog("命令方块审计阻断启动: " + commandBlockAudit.Describe())
 		return fmt.Errorf("命令方块配置未通过安全校验: %s", commandBlockAudit.Describe())
 	}
 	pluginUpdateAudit := AuditServerPluginUpdates(cfg.ServerDir)
 	if pluginUpdateAudit.Blocking() {
-		a.writeLog("security", "插件更新审计阻断启动: "+pluginUpdateAudit.Describe())
+		a.writeSecurityLog("插件更新审计阻断启动: " + pluginUpdateAudit.Describe())
 		return fmt.Errorf("插件更新配置未通过安全校验: %s", pluginUpdateAudit.Describe())
 	}
 	pluginMetricsAudit := AuditServerPluginMetrics(cfg.ServerDir)
 	if pluginMetricsAudit.Blocking() {
-		a.writeLog("security", "插件遥测审计阻断启动: "+pluginMetricsAudit.Describe())
+		a.writeSecurityLog("插件遥测审计阻断启动: " + pluginMetricsAudit.Describe())
 		return fmt.Errorf("插件遥测配置未通过安全校验: %s", pluginMetricsAudit.Describe())
 	}
 	queryBindingAudit := AuditServerQueryBinding(cfg.ServerDir)
 	if queryBindingAudit.Blocking() {
-		a.writeLog("security", "查询绑定审计阻断启动: "+queryBindingAudit.Describe())
+		a.writeSecurityLog("查询绑定审计阻断启动: " + queryBindingAudit.Describe())
 		return fmt.Errorf("查询绑定配置未通过安全校验: %s", queryBindingAudit.Describe())
 	}
 	entityCrammingAudit := AuditServerEntityCramming(cfg.ServerDir)
 	if entityCrammingAudit.Blocking() {
-		a.writeLog("security", "实体堆积审计阻断启动: "+entityCrammingAudit.Describe())
+		a.writeSecurityLog("实体堆积审计阻断启动: " + entityCrammingAudit.Describe())
 		return fmt.Errorf("实体堆积配置未通过安全校验: %s", entityCrammingAudit.Describe())
 	}
 	movementGuardAudit := AuditServerMovementGuards(cfg.ServerDir)
 	if movementGuardAudit.Blocking() {
-		a.writeLog("security", "移动容量审计阻断启动: "+movementGuardAudit.Describe())
+		a.writeSecurityLog("移动容量审计阻断启动: " + movementGuardAudit.Describe())
 		return fmt.Errorf("移动容量配置未通过安全校验: %s", movementGuardAudit.Describe())
 	}
 	proxyAuthAudit := AuditServerProxyAuth(cfg.ServerDir)
 	if proxyAuthAudit.Blocking() {
-		a.writeLog("security", "代理鉴权审计阻断启动: "+proxyAuthAudit.Describe())
+		a.writeSecurityLog("代理鉴权审计阻断启动: " + proxyAuthAudit.Describe())
 		return fmt.Errorf("服务器代理鉴权配置未通过安全校验: %s", proxyAuthAudit.Describe())
 	}
 	antiXrayAudit := AuditServerAntiXray(cfg.ServerDir)
 	if antiXrayAudit.Blocking() {
-		a.writeLog("security", "反矿透审计阻断启动: "+antiXrayAudit.Describe())
+		a.writeSecurityLog("反矿透审计阻断启动: " + antiXrayAudit.Describe())
 		return fmt.Errorf("服务器反矿透配置未通过安全校验: %s", antiXrayAudit.Describe())
 	}
 	watchdogAudit := AuditServerWatchdog(cfg.ServerDir)
 	if watchdogAudit.Blocking() {
-		a.writeLog("security", "看门狗审计阻断启动: "+watchdogAudit.Describe())
+		a.writeSecurityLog("看门狗审计阻断启动: " + watchdogAudit.Describe())
 		return fmt.Errorf("服务器看门狗与重启配置未通过安全校验: %s", watchdogAudit.Describe())
 	}
 	pregenAudit := AuditServerPregen(cfg.ServerDir)
 	if pregenAudit.Blocking() {
-		a.writeLog("security", "区块预生成审计阻断启动: "+pregenAudit.Describe())
+		a.writeSecurityLog("区块预生成审计阻断启动: " + pregenAudit.Describe())
 		return fmt.Errorf("服务器区块预生成配置未通过安全校验: %s", pregenAudit.Describe())
 	}
 	dynmapAudit := AuditServerDynmap(cfg.ServerDir)
 	if dynmapAudit.Blocking() {
-		a.writeLog("security", "网页地图审计阻断启动: "+dynmapAudit.Describe())
+		a.writeSecurityLog("网页地图审计阻断启动: " + dynmapAudit.Describe())
 		return fmt.Errorf("服务器网页地图配置未通过安全校验: %s", dynmapAudit.Describe())
 	}
 	unsafeToggleAudit := AuditServerUnsafeToggles(cfg.ServerDir)
 	if unsafeToggleAudit.Blocking() {
-		a.writeLog("security", "实验开关审计阻断启动: "+unsafeToggleAudit.Describe())
+		a.writeSecurityLog("实验开关审计阻断启动: " + unsafeToggleAudit.Describe())
 		return fmt.Errorf("服务器实验性开关未通过安全校验: %s", unsafeToggleAudit.Describe())
 	}
 	blueMapAudit := AuditServerBlueMap(cfg.ServerDir)
 	if blueMapAudit.Blocking() {
-		a.writeLog("security", "网页地图审计阻断启动: "+blueMapAudit.Describe())
+		a.writeSecurityLog("网页地图审计阻断启动: " + blueMapAudit.Describe())
 		return fmt.Errorf("网页地图审计未通过安全校验: %s", blueMapAudit.Describe())
 	}
 	userCacheAudit := AuditServerUserCache(cfg.ServerDir)
 	if userCacheAudit.Blocking() {
-		a.writeLog("security", "玩家缓存审计阻断启动: "+userCacheAudit.Describe())
+		a.writeSecurityLog("玩家缓存审计阻断启动: " + userCacheAudit.Describe())
 		return fmt.Errorf("玩家缓存审计未通过安全校验: %s", userCacheAudit.Describe())
 	}
 	bannedIPsAudit := AuditServerBannedIPs(cfg.ServerDir)
 	if bannedIPsAudit.Blocking() {
-		a.writeLog("security", "IP 封禁清单审计阻断启动: "+bannedIPsAudit.Describe())
+		a.writeSecurityLog("IP 封禁清单审计阻断启动: " + bannedIPsAudit.Describe())
 		return fmt.Errorf("IP 封禁清单审计未通过安全校验: %s", bannedIPsAudit.Describe())
 	}
 	bukkitConfigAudit := AuditServerBukkitConfig(cfg.ServerDir)
 	if bukkitConfigAudit.Blocking() {
-		a.writeLog("security", "Bukkit 配置审计阻断启动: "+bukkitConfigAudit.Describe())
+		a.writeSecurityLog("Bukkit 配置审计阻断启动: " + bukkitConfigAudit.Describe())
 		return fmt.Errorf("Bukkit 配置审计未通过安全校验: %s", bukkitConfigAudit.Describe())
 	}
 	worldNameAudit := AuditServerWorldName(cfg.ServerDir)
 	if worldNameAudit.Blocking() {
-		a.writeLog("security", "世界目录审计阻断启动: "+worldNameAudit.Describe())
+		a.writeSecurityLog("世界目录审计阻断启动: " + worldNameAudit.Describe())
 		return fmt.Errorf("世界目录审计未通过安全校验: %s", worldNameAudit.Describe())
 	}
 	worldSeedAudit := AuditServerWorldSeed(cfg.ServerDir)
 	if worldSeedAudit.Blocking() {
-		a.writeLog("security", "世界种子审计阻断启动: "+worldSeedAudit.Describe())
+		a.writeSecurityLog("世界种子审计阻断启动: " + worldSeedAudit.Describe())
 		return fmt.Errorf("世界种子审计未通过安全校验: %s", worldSeedAudit.Describe())
 	}
 	opsJsonAudit := AuditServerOpsJson(cfg.ServerDir)
 	if opsJsonAudit.Blocking() {
-		a.writeLog("security", "操作员清单审计阻断启动: "+opsJsonAudit.Describe())
+		a.writeSecurityLog("操作员清单审计阻断启动: " + opsJsonAudit.Describe())
 		return fmt.Errorf("服务器操作员清单未通过安全校验: %s", opsJsonAudit.Describe())
 	}
 	whitelistFileAudit := AuditServerWhitelistFile(cfg.ServerDir)
 	if whitelistFileAudit.Blocking() {
-		a.writeLog("security", "白名单文件审计阻断启动: "+whitelistFileAudit.Describe())
+		a.writeSecurityLog("白名单文件审计阻断启动: " + whitelistFileAudit.Describe())
 		return fmt.Errorf("服务器白名单文件未通过安全校验: %s", whitelistFileAudit.Describe())
 	}
 	commandsYmlAudit := AuditServerCommandsYml(cfg.ServerDir)
 	if commandsYmlAudit.Blocking() {
-		a.writeLog("security", "命令别名审计阻断启动: "+commandsYmlAudit.Describe())
+		a.writeSecurityLog("命令别名审计阻断启动: " + commandsYmlAudit.Describe())
 		return fmt.Errorf("服务器命令别名配置未通过安全校验: %s", commandsYmlAudit.Describe())
 	}
 	helpYmlAudit := AuditServerHelpYml(cfg.ServerDir)
 	if helpYmlAudit.Blocking() {
-		a.writeLog("security", "帮助配置审计阻断启动: "+helpYmlAudit.Describe())
+		a.writeSecurityLog("帮助配置审计阻断启动: " + helpYmlAudit.Describe())
 		return fmt.Errorf("服务器帮助配置未通过安全校验: %s", helpYmlAudit.Describe())
 	}
 	spigotAudit := AuditServerSpigotConfig(cfg.ServerDir)
 	if spigotAudit.Blocking() {
-		a.writeLog("security", "Spigot 配置审计阻断启动: "+spigotAudit.Describe())
+		a.writeSecurityLog("Spigot 配置审计阻断启动: " + spigotAudit.Describe())
 		return fmt.Errorf("服务器 Spigot 配置未通过安全校验: %s", spigotAudit.Describe())
 	}
 	paperAudit := AuditServerPaperConfig(cfg.ServerDir)
 	if paperAudit.Blocking() {
-		a.writeLog("security", "Paper 全局配置审计阻断启动: "+paperAudit.Describe())
+		a.writeSecurityLog("Paper 全局配置审计阻断启动: " + paperAudit.Describe())
 		return fmt.Errorf("服务器 Paper 全局配置未通过安全校验: %s", paperAudit.Describe())
 	}
 	eulaAudit := AuditServerEula(cfg.ServerDir)
 	if eulaAudit.Blocking() {
-		a.writeLog("security", "EULA 协议审计阻断启动: "+eulaAudit.Describe())
+		a.writeSecurityLog("EULA 协议审计阻断启动: " + eulaAudit.Describe())
 		return fmt.Errorf("服务器 EULA 协议未通过安全校验: %s", eulaAudit.Describe())
 	}
 	iconFileAudit := AuditServerIconFile(cfg.ServerDir)
 	if iconFileAudit.Blocking() {
-		a.writeLog("security", "服务器图标审计阻断启动: "+iconFileAudit.Describe())
+		a.writeSecurityLog("服务器图标审计阻断启动: " + iconFileAudit.Describe())
 		return fmt.Errorf("服务器图标未通过安全校验: %s", iconFileAudit.Describe())
 	}
 	permissionsFileAudit := AuditServerPermissions(cfg.ServerDir)
 	if permissionsFileAudit.Blocking() {
-		a.writeLog("security", "权限配置审计阻断启动: "+permissionsFileAudit.Describe())
+		a.writeSecurityLog("权限配置审计阻断启动: " + permissionsFileAudit.Describe())
 		return fmt.Errorf("服务器权限配置未通过安全校验: %s", permissionsFileAudit.Describe())
 	}
 	bannedPlayersFileAudit := AuditServerBannedPlayers(cfg.ServerDir)
 	if bannedPlayersFileAudit.Blocking() {
-		a.writeLog("security", "封禁名单审计阻断启动: "+bannedPlayersFileAudit.Describe())
+		a.writeSecurityLog("封禁名单审计阻断启动: " + bannedPlayersFileAudit.Describe())
 		return fmt.Errorf("服务器封禁名单未通过安全校验: %s", bannedPlayersFileAudit.Describe())
 	}
 	paperWorldAudit := AuditServerPaperWorldDefaults(cfg.ServerDir)
 	if paperWorldAudit.Blocking() {
-		a.writeLog("security", "Paper 世界默认配置审计阻断启动: "+paperWorldAudit.Describe())
+		a.writeSecurityLog("Paper 世界默认配置审计阻断启动: " + paperWorldAudit.Describe())
 		return fmt.Errorf("服务器 Paper 世界默认配置未通过安全校验: %s", paperWorldAudit.Describe())
 	}
 	purpurConfigAudit := AuditServerPurpurConfig(cfg.ServerDir)
 	if purpurConfigAudit.Blocking() {
-		a.writeLog("security", "Purpur 配置审计阻断启动: "+purpurConfigAudit.Describe())
+		a.writeSecurityLog("Purpur 配置审计阻断启动: " + purpurConfigAudit.Describe())
 		return fmt.Errorf("服务器 Purpur 配置未通过安全校验: %s", purpurConfigAudit.Describe())
 	}
 	levelDataAudit := AuditServerLevelData(cfg.ServerDir)
 	if levelDataAudit.Blocking() {
-		a.writeLog("security", "存档元数据审计阻断启动: "+levelDataAudit.Describe())
+		a.writeSecurityLog("存档元数据审计阻断启动: " + levelDataAudit.Describe())
 		return fmt.Errorf("服务器存档元数据未通过安全校验: %s", levelDataAudit.Describe())
 	}
 	propertiesEncodingAudit := AuditServerPropertiesEncoding(cfg.ServerDir)
 	if propertiesEncodingAudit.Blocking() {
-		a.writeLog("security", "属性文件编码审计阻断启动: "+propertiesEncodingAudit.Describe())
+		a.writeSecurityLog("属性文件编码审计阻断启动: " + propertiesEncodingAudit.Describe())
 		return fmt.Errorf("服务器属性文件编码未通过安全校验: %s", propertiesEncodingAudit.Describe())
 	}
 	jvmArgsFileAudit := AuditServerJvmArgsFile(cfg.ServerDir)
 	if jvmArgsFileAudit.Blocking() {
-		a.writeLog("security", "JVM 参数审计阻断启动: "+jvmArgsFileAudit.Describe())
+		a.writeSecurityLog("JVM 参数审计阻断启动: " + jvmArgsFileAudit.Describe())
 		return fmt.Errorf("服务器 JVM 参数未通过安全校验: %s", jvmArgsFileAudit.Describe())
 	}
 	crashReportsAudit := AuditServerCrashReports(cfg.ServerDir)
 	if crashReportsAudit.Blocking() {
-		a.writeLog("security", "崩溃报告审计阻断启动: "+crashReportsAudit.Describe())
+		a.writeSecurityLog("崩溃报告审计阻断启动: " + crashReportsAudit.Describe())
 		return fmt.Errorf("服务器崩溃报告未通过安全校验: %s", crashReportsAudit.Describe())
 	}
 	configConsistencyAudit := AuditServerConfigConsistency(cfg.ServerDir)
 	if configConsistencyAudit.Blocking() {
-		a.writeLog("security", "配置一致性审计阻断启动: "+configConsistencyAudit.Describe())
+		a.writeSecurityLog("配置一致性审计阻断启动: " + configConsistencyAudit.Describe())
 		return fmt.Errorf("服务器配置组合未通过安全校验: %s", configConsistencyAudit.Describe())
 	}
 	onlineModeAudit := AuditServerOnlineMode(cfg.ServerDir)
 	if onlineModeAudit.Blocking() {
-		a.writeLog("security", "在线认证审计阻断启动: "+onlineModeAudit.Describe())
+		a.writeSecurityLog("在线认证审计阻断启动: " + onlineModeAudit.Describe())
 		return fmt.Errorf("server.properties 在线认证配置未通过安全校验: %s", onlineModeAudit.Describe())
 	}
 	motdControlAudit := AuditServerMotdControl(cfg.ServerDir)
 	if motdControlAudit.Blocking() {
-		a.writeLog("security", "MOTD 控制字符审计阻断启动: "+motdControlAudit.Describe())
+		a.writeSecurityLog("MOTD 控制字符审计阻断启动: " + motdControlAudit.Describe())
 		return fmt.Errorf("MOTD 文本未通过安全校验: %s", motdControlAudit.Describe())
 	}
 	propsStructureAudit := AuditServerPropertiesStructure(cfg.ServerDir)
 	if propsStructureAudit.Blocking() {
-		a.writeLog("security", "属性文件结构审计阻断启动: "+propsStructureAudit.Describe())
+		a.writeSecurityLog("属性文件结构审计阻断启动: " + propsStructureAudit.Describe())
 		return fmt.Errorf("server.properties 结构未通过安全校验: %s", propsStructureAudit.Describe())
 	}
 	whitelistCoverageAudit := AuditServerWhitelistCoverage(cfg.ServerDir)
 	if whitelistCoverageAudit.Blocking() {
-		a.writeLog("security", "白名单覆盖审计阻断启动: "+whitelistCoverageAudit.Describe())
+		a.writeSecurityLog("白名单覆盖审计阻断启动: " + whitelistCoverageAudit.Describe())
 		return fmt.Errorf("白名单覆盖配置未通过安全校验: %s", whitelistCoverageAudit.Describe())
 	}
 	hardcoreAudit := AuditServerHardcore(cfg.ServerDir)
 	if hardcoreAudit.Blocking() {
-		a.writeLog("security", "难度模式审计阻断启动: "+hardcoreAudit.Describe())
+		a.writeSecurityLog("难度模式审计阻断启动: " + hardcoreAudit.Describe())
 		return fmt.Errorf("难度与游戏模式配置未通过安全校验: %s", hardcoreAudit.Describe())
 	}
 	maxPlayersAudit := AuditServerMaxPlayers(cfg.ServerDir)
 	if maxPlayersAudit.Blocking() {
-		a.writeLog("security", "容量限流审计阻断启动: "+maxPlayersAudit.Describe())
+		a.writeSecurityLog("容量限流审计阻断启动: " + maxPlayersAudit.Describe())
 		return fmt.Errorf("容量与限流配置未通过安全校验: %s", maxPlayersAudit.Describe())
 	}
 	banEnforcementAudit := AuditServerBanEnforcement(cfg.ServerDir)
 	if banEnforcementAudit.Blocking() {
-		a.writeLog("security", "封禁名单审计阻断启动: "+banEnforcementAudit.Describe())
+		a.writeSecurityLog("封禁名单审计阻断启动: " + banEnforcementAudit.Describe())
 		return fmt.Errorf("封禁与管理员名单未通过安全校验: %s", banEnforcementAudit.Describe())
 	}
 	exploitTogglesAudit := AuditServerExploitToggles(cfg.ServerDir)
 	if exploitTogglesAudit.Blocking() {
-		a.writeLog("security", "作弊开关审计阻断启动: "+exploitTogglesAudit.Describe())
+		a.writeSecurityLog("作弊开关审计阻断启动: " + exploitTogglesAudit.Describe())
 		return fmt.Errorf("作弊与权限开关配置未通过安全校验: %s", exploitTogglesAudit.Describe())
 	}
 	worldSymlinkAudit := AuditServerWorldSymlinks(cfg.ServerDir)
 	if worldSymlinkAudit.Blocking() {
-		a.writeLog("security", "世界存档符号链接审计阻断启动: "+worldSymlinkAudit.Describe())
+		a.writeSecurityLog("世界存档符号链接审计阻断启动: " + worldSymlinkAudit.Describe())
 		return fmt.Errorf("世界存档目录未通过安全校验: %s", worldSymlinkAudit.Describe())
 	}
 	opsPrivilegeAudit := AuditServerOpsPrivilege(cfg.ServerDir)
 	if opsPrivilegeAudit.Blocking() {
-		a.writeLog("security", "运维权限审计阻断启动: "+opsPrivilegeAudit.Describe())
+		a.writeSecurityLog("运维权限审计阻断启动: " + opsPrivilegeAudit.Describe())
 		return fmt.Errorf("运维权限配置未通过安全校验: %s", opsPrivilegeAudit.Describe())
 	}
 	rconHardeningAudit := AuditServerRconHardening(cfg.ServerDir)
 	if rconHardeningAudit.Blocking() {
-		a.writeLog("security", "RCON 加固审计阻断启动: "+rconHardeningAudit.Describe())
+		a.writeSecurityLog("RCON 加固审计阻断启动: " + rconHardeningAudit.Describe())
 		return fmt.Errorf("RCON 配置未通过安全校验: %s", rconHardeningAudit.Describe())
 	}
 	queryExposureAudit := AuditServerQueryExposure(cfg.ServerDir)
 	if queryExposureAudit.Blocking() {
-		a.writeLog("security", "对外暴露审计阻断启动: "+queryExposureAudit.Describe())
+		a.writeSecurityLog("对外暴露审计阻断启动: " + queryExposureAudit.Describe())
 		return fmt.Errorf("对外暴露配置未通过安全校验: %s", queryExposureAudit.Describe())
 	}
 	pluginConfigAudit := AuditServerPluginConfig(cfg.ServerDir)
@@ -1749,4 +1749,8 @@ func (a *App) DeleteServer(name string) error {
 		return fmt.Errorf("服务器目录路径不安全（必须是服务器根目录的子目录），拒绝删除")
 	}
 	return os.RemoveAll(cfg.ServerDir)
+}
+
+func (a *App) writeSecurityLog(message string) {
+	a.writeLog("[security] %s", message)
 }

@@ -49,16 +49,11 @@ func (a *BlueMapAudit) add(file, reason, detail string, blocking bool) {
 }
 
 func (a *BlueMapAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f BlueMapFinding) bool { return f.Blocking })
 }
 
 func (a *BlueMapAudit) HasWarnings() bool {
-	return len(a.Findings) > 0
+	return hasAny(a.Findings)
 }
 
 func (a *BlueMapAudit) Describe() string {

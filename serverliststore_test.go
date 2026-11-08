@@ -243,3 +243,22 @@ func TestServerListStoreRejectsSymlinkDirectory(t *testing.T) {
 		t.Fatalf("store file created outside root via symlinked directory")
 	}
 }
+
+func TestNormalizeSavedServerEntryRejectsFormatRunes(t *testing.T) {
+	in := SavedServerEntry{Name: "ok", Host: "evil\u202e.example.com", Port: 25565}
+	if _, err := normalizeSavedServerEntry(in); err == nil {
+		t.Fatalf("saved host with bidi override accepted")
+	}
+	in = SavedServerEntry{Name: "ok", Host: "evil\u0085.example.com", Port: 25565}
+	if _, err := normalizeSavedServerEntry(in); err == nil {
+		t.Fatalf("saved host with C1 control accepted")
+	}
+	good := SavedServerEntry{Name: "Hypixel\u202eevil", Host: "play.example.com", Port: 25565}
+	out, err := normalizeSavedServerEntry(good)
+	if err != nil {
+		t.Fatalf("valid entry rejected: %v", err)
+	}
+	if out.Name != "Hypixelevil" {
+		t.Fatalf("saved name = %q, want sanitized name", out.Name)
+	}
+}

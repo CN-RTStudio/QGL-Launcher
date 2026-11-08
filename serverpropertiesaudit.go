@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -68,26 +67,13 @@ func (a *PropertiesAudit) HasWarnings() bool {
 }
 
 func (a *PropertiesAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return "server.properties 安全项全部通过"
-	}
-	sorted := make([]PropertiesFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Reason != sorted[j].Reason {
-			return sorted[i].Reason < sorted[j].Reason
-		}
-		return sorted[i].Key < sorted[j].Key
-	})
-	parts := make([]string, 0, len(sorted))
-	for i, f := range sorted {
-		if i >= 10 {
-			parts = append(parts, fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		parts = append(parts, f.Reason+"("+f.Key+")")
-	}
-	return strings.Join(parts, "；")
+	return describeAuditFindings("server.properties 安全项全部通过", a.Findings, 10,
+		func(f PropertiesFinding) []string {
+			return []string{f.Reason, f.Key}
+		},
+		func(f PropertiesFinding) string {
+			return f.Reason + "(" + f.Key + ")"
+		})
 }
 
 func prpParse(text string) map[string]string {

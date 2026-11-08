@@ -71,12 +71,7 @@ type StartupSecretAudit struct {
 }
 
 func (a StartupSecretAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f StartupSecretFinding) bool { return f.Blocking })
 }
 
 func (a StartupSecretAudit) HasWarnings() bool {

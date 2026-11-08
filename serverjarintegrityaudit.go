@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -62,26 +61,13 @@ func (a *JarIntegrityAudit) HasWarnings() bool {
 }
 
 func (a *JarIntegrityAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return "服务端 jar 与 SHA1 校验文件一致"
-	}
-	sorted := make([]JarIntegrityFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Reason != sorted[j].Reason {
-			return sorted[i].Reason < sorted[j].Reason
-		}
-		return sorted[i].File < sorted[j].File
-	})
-	parts := make([]string, 0, len(sorted))
-	for i, f := range sorted {
-		if i >= 8 {
-			parts = append(parts, fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		parts = append(parts, f.Reason)
-	}
-	return strings.Join(parts, "；")
+	return describeAuditFindings("服务端 jar 与 SHA1 校验文件一致", a.Findings, 8,
+		func(f JarIntegrityFinding) []string {
+			return []string{f.Reason, f.File}
+		},
+		func(f JarIntegrityFinding) string {
+			return f.Reason
+		})
 }
 
 func jvrHashJar(path string, limit int64) (string, error) {

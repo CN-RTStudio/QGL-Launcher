@@ -1267,8 +1267,11 @@ func (a *App) downloadForgeMappings(mcDir string, mcVersion string, installerPat
 
 	fmt.Printf("检测到 Forge MOJMAPS: %s\n", mcpVersion)
 
-	targetPath := filepath.Join(mcDir, "libraries", "net", "minecraft", "client", mcpVersion,
-		fmt.Sprintf("client-%s-mappings.txt", mcpVersion))
+	targetPath, ok := SafeMappingsVersionPath(mcDir, mcpVersion)
+	if !ok {
+		fmt.Printf("MOJMAPS.version 未通过落盘路径白名单（跳过 Mappings 下载）: %s\n", mcpVersion)
+		return
+	}
 
 	if _, err := os.Stat(targetPath); err == nil {
 		fmt.Printf("Mappings 文件已存在: %s\n", targetPath)
@@ -1310,8 +1313,9 @@ func (a *App) downloadForgeMappings(mcDir string, mcVersion string, installerPat
 	mappingsURL = rewriteMappedDataURLToBMCL(mappingsURL)
 
 	tempPath := targetPath + ".tmp"
+	_ = os.Remove(tempPath)
 	fmt.Printf("下载 Forge Mappings (%s): %s\n", mcpVersion, mappingsURL)
-	if err := a.downloadFile(mappingsURL, tempPath, false); err != nil {
+	if err := a.downloadFileBounded(mappingsURL, tempPath, false, maxMappingsDownloadBytes); err != nil {
 		os.Remove(tempPath)
 		fmt.Printf("下载 Mappings 失败: %v\n", err)
 		return

@@ -2,7 +2,6 @@ package main
 
 import (
 	"archive/zip"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -208,16 +207,7 @@ func writeWorldZipAtomic(planned []worldPlannedFile, zipPath string, lim WorldBa
 
 // umfsFileHex 计算文件的 UMFS 摘要（小写 hex），用于本地备份完整性核对。
 func umfsFileHex(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := NewUMFSHash()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return umfsFile(path)
 }
 
 // worldBackupDirFor 返回某世界的备份目录 root/<world>，并保证名段安全。

@@ -32,6 +32,51 @@ type ServerListLimits struct {
 	MaxLineRunes int
 }
 
+func serverFormatRune(r rune) bool {
+	if r < 0x20 || r == 0x7f {
+		return true
+	}
+	if r >= 0x80 && r <= 0x9f {
+		return true
+	}
+	if r >= 0x202a && r <= 0x202e {
+		return true
+	}
+	if r >= 0x2066 && r <= 0x2069 {
+		return true
+	}
+	switch r {
+	case 0x200b, 0x200c, 0x200d, 0x200e, 0x200f, 0x2028, 0x2029, 0xfeff:
+		return true
+	}
+	return false
+}
+
+func parseServerPort(raw string, max int) (int, bool) {
+	if raw == "" {
+		return 0, false
+	}
+	for i := 0; i < len(raw); i++ {
+		if raw[i] < '0' || raw[i] > '9' {
+			return 0, false
+		}
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v < 1 || v > max {
+		return 0, false
+	}
+	return v, true
+}
+
+func serverTextHasFormatRune(s string) bool {
+	for _, r := range s {
+		if serverFormatRune(r) {
+			return true
+		}
+	}
+	return false
+}
+
 func (l *ServerListLimits) withDefaults() ServerListLimits {
 	if l == nil {
 		l = &ServerListLimits{}
@@ -99,7 +144,7 @@ func ParseServerAddress(raw string, lim ServerListLimits) (ServerEntry, error) {
 	if len([]rune(trimmed)) > d.MaxLineRunes {
 		return ServerEntry{}, errors.New("server address too long")
 	}
-	if hasControlCharStr(raw) {
+	if serverTextHasFormatRune(raw) {
 		return ServerEntry{}, errors.New("server address contains control characters")
 	}
 	if strings.ContainsAny(trimmed, " \t\"';,<>") {
@@ -118,7 +163,9 @@ func ParseServerAddress(raw string, lim ServerListLimits) (ServerEntry, error) {
 
 	hostPart := trimmed
 	port := 25565
+	bracketed := false
 	if strings.HasPrefix(trimmed, "[") {
+		bracketed = true
 		end := strings.IndexByte(trimmed, ']')
 		if end < 0 {
 			return ServerEntry{}, errors.New("server address has unterminated ipv6 bracket")
@@ -132,9 +179,8 @@ func ParseServerAddress(raw string, lim ServerListLimits) (ServerEntry, error) {
 			if !strings.HasPrefix(suffix, ":") {
 				return ServerEntry{}, errors.New("server address has invalid port")
 			}
-			portRaw := suffix[1:]
-			portValue, err := strconv.Atoi(portRaw)
-			if err != nil || portValue < 1 || portValue > d.MaxPort {
+			portValue, ok := parseServerPort(suffix[1:], d.MaxPort)
+			if !ok {
 				return ServerEntry{}, errors.New("server address has invalid port")
 			}
 			port = portValue
@@ -146,8 +192,8 @@ func ParseServerAddress(raw string, lim ServerListLimits) (ServerEntry, error) {
 		if portRaw == "" {
 			return ServerEntry{}, errors.New("server address has empty port")
 		}
-		portValue, err := strconv.Atoi(portRaw)
-		if err != nil || portValue < 1 || portValue > d.MaxPort {
+		portValue, ok := parseServerPort(portRaw, d.MaxPort)
+		if !ok {
 			return ServerEntry{}, errors.New("server address has invalid port")
 		}
 		port = portValue
@@ -162,6 +208,11 @@ func ParseServerAddress(raw string, lim ServerListLimits) (ServerEntry, error) {
 	// 裸 IPv6 无端口时冒号是合法字符，这里按无端口处理）。
 	if strings.Contains(hostPart, " ") {
 		return ServerEntry{}, errors.New("server host contains whitespace")
+	}
+	if !bracketed && strings.Contains(hostPart, ":") {
+		if _, ok := parseDestIP(hostPart); !ok {
+			return ServerEntry{}, errors.New("server host has stray colon")
+		}
 	}
 
 	return ServerEntry{
@@ -208,8 +259,7 @@ func SanitizeServerName(name string, lim ServerListLimits) string {
 	// 统一走 strings.Map 剥控制字符：不依赖 hasControlCharStr 预闸门（它只扫
 	// 原始字节 ≤0x1F，会漏掉 C1 控制区 U+0080-U+009F 的 UTF-8 编码）。
 	clean = strings.Map(func(r rune) rune {
-		// 删 ASCII 控制区 (0x00-0x1F)、DEL (0x7F) 以及 C1 控制区 (0x80-0x9F)。
-		if r < 0x20 || (r >= 0x7f && r <= 0x9f) {
+		if serverFormatRune(r) {
 			return -1
 		}
 		return r

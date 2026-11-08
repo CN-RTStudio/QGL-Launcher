@@ -1,10 +1,8 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -61,34 +59,16 @@ func (a *JvmArgsAudit) HasWarnings() bool {
 }
 
 func (a *JvmArgsAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return "user_jvm_args.txt 未发现风险"
-	}
-	sorted := make([]JvmArgsFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].Reason != sorted[j].Reason {
-			return sorted[i].Reason < sorted[j].Reason
-		}
-		return sorted[i].Detail < sorted[j].Detail
-	})
-	var b strings.Builder
-	for i, f := range sorted {
-		if i >= 12 {
-			b.WriteString(fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		if i > 0 {
-			b.WriteString("；")
-		}
-		b.WriteString(f.Reason)
-		if f.Detail != "" {
-			b.WriteString("(")
-			b.WriteString(f.Detail)
-			b.WriteString(")")
-		}
-	}
-	return b.String()
+	return describeAuditFindings("user_jvm_args.txt 未发现风险", a.Findings, 12,
+		func(f JvmArgsFinding) []string {
+			return []string{f.Reason, f.Detail}
+		},
+		func(f JvmArgsFinding) string {
+			if f.Detail == "" {
+				return f.Reason
+			}
+			return f.Reason + "(" + f.Detail + ")"
+		})
 }
 
 func sjaHeapGB(value string) (float64, bool) {

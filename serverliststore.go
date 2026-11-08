@@ -73,7 +73,7 @@ func normalizeSavedServerEntry(entry SavedServerEntry) (SavedServerEntry, error)
 	if len([]rune(host)) > serverListStoreHostRune {
 		return SavedServerEntry{}, errors.New("saved server host is too long")
 	}
-	if hasControlCharStr(host) || strings.ContainsAny(host, " \t\"';,<>/\\") {
+	if serverTextHasFormatRune(host) || strings.ContainsAny(host, " \t\"';,<>/\\") {
 		return SavedServerEntry{}, errors.New("saved server host contains forbidden characters")
 	}
 	if entry.Port < 1 || entry.Port > 65535 {

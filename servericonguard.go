@@ -47,12 +47,7 @@ type IconAudit struct {
 }
 
 func (a IconAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f IconFinding) bool { return f.Blocking })
 }
 
 func (a IconAudit) HasWarnings() bool {

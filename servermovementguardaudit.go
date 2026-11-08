@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -49,12 +48,7 @@ func (a *MovementGuardAudit) add(file, reason, detail string, blocking bool) {
 }
 
 func (a *MovementGuardAudit) Blocking() bool {
-	for _, f := range a.Findings {
-		if f.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(a.Findings, func(f MovementGuardFinding) bool { return f.Blocking })
 }
 
 func (a *MovementGuardAudit) HasWarnings() bool {
@@ -67,15 +61,7 @@ func (a *MovementGuardAudit) HasWarnings() bool {
 }
 
 func (a *MovementGuardAudit) Describe() string {
-	items := make([]string, 0, len(a.Findings))
-	for _, f := range a.Findings {
-		items = append(items, fmt.Sprintf("%s:%s:%s", f.File, f.Reason, f.Detail))
-	}
-	sort.Strings(items)
-	if len(items) > 12 {
-		items = append(items[:12], fmt.Sprintf("...共%d项", len(a.Findings)))
-	}
-	return strings.Join(items, "; ")
+	return describeFindings(a.Findings, func(f MovementGuardFinding) string { return fmt.Sprintf("%s:%s:%s", f.File, f.Reason, f.Detail) }, 12)
 }
 
 func smaLoadText(a *MovementGuardAudit, root, rel string, maxBytes int64) (string, bool) {

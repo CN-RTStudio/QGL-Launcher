@@ -286,7 +286,16 @@ func remoteBoolValue(value string, fallback bool) bool {
 }
 
 func remotePort(value string) (int, bool) {
-	port, err := strconv.Atoi(strings.TrimSpace(value))
+	trimmed := strings.TrimSpace(value)
+	for i := 0; i < len(trimmed); i++ {
+		if trimmed[i] < '0' || trimmed[i] > '9' {
+			return 0, false
+		}
+	}
+	if len(trimmed) > 1 && trimmed[0] == '0' {
+		return 0, false
+	}
+	port, err := strconv.Atoi(trimmed)
 	if err != nil || port < 1 || port > 65535 {
 		return 0, false
 	}

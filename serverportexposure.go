@@ -43,12 +43,7 @@ type PortExposureAudit struct {
 }
 
 func (audit PortExposureAudit) Blocking() bool {
-	for _, finding := range audit.Findings {
-		if finding.Blocking {
-			return true
-		}
-	}
-	return false
+	return anyBlocking(audit.Findings, func(f PortFinding) bool { return f.Blocking })
 }
 
 func (audit PortExposureAudit) HasWarnings() bool {
@@ -56,16 +51,7 @@ func (audit PortExposureAudit) HasWarnings() bool {
 }
 
 func (audit PortExposureAudit) Codes() []string {
-	seen := map[string]bool{}
-	codes := []string{}
-	for _, finding := range audit.Findings {
-		if !seen[finding.Reason] {
-			seen[finding.Reason] = true
-			codes = append(codes, finding.Reason)
-		}
-	}
-	sort.Strings(codes)
-	return codes
+	return findingCodes(audit.Findings, func(f PortFinding) string { return f.Reason })
 }
 
 func (audit PortExposureAudit) Describe() string {
@@ -86,6 +72,14 @@ func parsePortValue(key, raw string) (int, *PortFinding) {
 	}
 	if strings.HasPrefix(trimmed, "-") || strings.ContainsAny(trimmed, " \t") {
 		return 0, &PortFinding{Key: key, Value: raw, Reason: portReasonBadNumber, Detail: "端口含非法字符", Blocking: true}
+	}
+	for i := 0; i < len(trimmed); i++ {
+		if trimmed[i] < '0' || trimmed[i] > '9' {
+			return 0, &PortFinding{Key: key, Value: raw, Reason: portReasonBadNumber, Detail: "端口含非数字字符", Blocking: true}
+		}
+	}
+	if len(trimmed) > 1 && trimmed[0] == '0' {
+		return 0, &PortFinding{Key: key, Value: raw, Reason: portReasonBadNumber, Detail: "端口含前导零歧义", Blocking: true}
 	}
 	value, err := strconv.Atoi(trimmed)
 	if err != nil {

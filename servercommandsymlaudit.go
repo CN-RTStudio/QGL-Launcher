@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -64,39 +63,16 @@ func (a *CommandsYmlAudit) HasWarnings() bool {
 }
 
 func (a *CommandsYmlAudit) Describe() string {
-	if len(a.Findings) == 0 {
-		return "服务器命令别名配置未发现风险"
-	}
-	sorted := make([]CommandsYmlFinding, len(a.Findings))
-	copy(sorted, a.Findings)
-	sort.Slice(sorted, func(i, j int) bool {
-		if sorted[i].File != sorted[j].File {
-			return sorted[i].File < sorted[j].File
-		}
-		if sorted[i].Reason != sorted[j].Reason {
-			return sorted[i].Reason < sorted[j].Reason
-		}
-		return sorted[i].Detail < sorted[j].Detail
-	})
-	var b strings.Builder
-	for i, f := range sorted {
-		if i >= 12 {
-			b.WriteString(fmt.Sprintf("…等 %d 项", len(sorted)))
-			break
-		}
-		if i > 0 {
-			b.WriteString("；")
-		}
-		b.WriteString(f.File)
-		b.WriteString(": ")
-		b.WriteString(f.Reason)
-		if f.Detail != "" {
-			b.WriteString("(")
-			b.WriteString(f.Detail)
-			b.WriteString(")")
-		}
-	}
-	return b.String()
+	return describeAuditFindings("服务器命令别名配置未发现风险", a.Findings, 12,
+		func(f CommandsYmlFinding) []string {
+			return []string{f.File, f.Reason, f.Detail}
+		},
+		func(f CommandsYmlFinding) string {
+			if f.Detail == "" {
+				return f.File + ": " + f.Reason
+			}
+			return f.File + ": " + f.Reason + "(" + f.Detail + ")"
+		})
 }
 
 func scyValidAliasName(value string) bool {

@@ -1,25 +1,25 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import {
-  CheckFirstRun, GetUsers, CreateGuestUser, CreateOfflineUser,
-  LoginUser, SetCurrentUser, UserHasPassword, GetUserType,
+  GetUsers, CreateGuestUser, CreateOfflineUser,
+  LoginUser, SetCurrentUser, UserHasPassword,
   StartMicrosoftLogin, LoginYggdrasil, CreateExternalUser,
-  GetYggdrasilServerInfo, DownloadAuthlibInjector,
-  MigrateFromPCLCE, SelectPclExe, GetPclMcDir, SelectMinecraftDir,
-  MigrateMinecraftDir, SetVersionIsolation
+  GetYggdrasilServerInfo, DownloadAuthlibInjector
 } from '../../wailsjs/go/main/App.js'
 import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime.js'
-import { showQGLDialog } from '../composables/qglDialog.js'
-import { useAvatars } from '../composables/avatar.js'
 
 const props = defineProps({
   isFirstRun: Boolean
 })
 
-const emit = defineEmits(['login-success', 'navigate-migrate'])
+const emit = defineEmits(['login-success'])
 
 const { t } = useI18n()
+
+function cleanError(e) {
+  return String(e).replace('Error: ', '')
+}
 
 // 模式: 'create-guest' | 'create-offline' | 'create-premium' | 'create-external' | 'login'
 const mode = ref(props.isFirstRun ? 'create-guest' : 'login')
@@ -40,10 +40,6 @@ const extEmail = ref('') // 外置登录用邮箱作为用户名
 
 // 当前选中的用户（用于登录模式展示头像和用户名）
 const selectedUser = ref(null)
-
-// 真实头像（皮肤脸）
-const { avatarMap, loadAvatar } = useAvatars()
-watch(selectedUser, (u) => { if (u) loadAvatar(u) })
 
 // 正版登录相关
 const msLoginStep = ref('') // 'device-code' | 'polling' | 'progress'
@@ -88,17 +84,13 @@ const selectedUserHasPassword = computed(() => {
 })
 
 onMounted(async () => {
-  // 加载用户列表
   await loadUsers()
 
   EventsOn('msLoginSuccess', (mcUsername) => {
     loading.value = false
     msLoginStep.value = ''
     emit('login-success', {
-      username: mcUsername,
-      hasPassword: false,
-      type: 'premium',
-      isLocked: false
+      username: mcUsername, hasPassword: false, type: 'premium', isLocked: false
     })
   })
 
@@ -122,10 +114,25 @@ onUnmounted(() => {
 async function loadUsers() {
   try {
     users.value = await GetUsers()
-    // 预加载所有用户的真实头像（皮肤脸），仅正版/外置用户会有值
-    users.value.forEach(u => loadAvatar(u))
-  } catch {
+  } catch (e) {
+    console.error('加载用户列表失败:', e)
     users.value = []
+  }
+}
+
+function resetState(clearExt = false) {
+  error.value = ''
+  username.value = ''
+  password.value = ''
+  confirmPassword.value = ''
+  securityPassword.value = ''
+  msLoginStep.value = ''
+  selectedUser.value = null
+  if (clearExt) {
+    extServerURL.value = ''
+    extEmail.value = ''
+    extServerName.value = ''
+    extTemplate.value = 'custom'
   }
 }
 
@@ -151,16 +158,13 @@ async function handleCreateGuest() {
 
   loading.value = true
   try {
-    const dir = await CreateGuestUser(username.value.trim(), securityPassword.value.trim())
-    await SetCurrentUser(dir)
+    await CreateGuestUser(username.value.trim(), securityPassword.value.trim())
+    await SetCurrentUser(username.value.trim())
     emit('login-success', {
-      username: username.value.trim(),
-      hasPassword: false,
-      type: 'guest',
-      isLocked: true
+      username: username.value.trim(), hasPassword: false, type: 'guest', isLocked: true
     })
   } catch (e) {
-    error.value = String(e).replace('Error: ', '')
+    error.value = cleanError(e)
   } finally {
     loading.value = false
   }
@@ -184,16 +188,13 @@ async function handleCreateOffline() {
 
   loading.value = true
   try {
-    const dir = await CreateOfflineUser(username.value.trim(), password.value)
-    await SetCurrentUser(dir)
+    await CreateOfflineUser(username.value.trim(), password.value)
+    await SetCurrentUser(username.value.trim())
     emit('login-success', {
-      username: username.value.trim(),
-      hasPassword: !!password.value,
-      type: 'offline',
-      isLocked: false
+      username: username.value.trim(), hasPassword: !!password.value, type: 'offline', isLocked: false
     })
   } catch (e) {
-    error.value = String(e).replace('Error: ', '')
+    error.value = cleanError(e)
   } finally {
     loading.value = false
   }
@@ -216,7 +217,7 @@ async function handlePremiumLogin() {
   } catch (e) {
     loading.value = false
     msLoginStep.value = ''
-    error.value = String(e).replace('Error: ', '')
+    error.value = cleanError(e)
   }
 }
 
@@ -229,58 +230,27 @@ async function handleLogin() {
   }
 
   const name = selectedUser.value.username
-  const id = selectedUser.value.dir || name // 用户标识（随机文件夹名）
   const userType = selectedUser.value.type || 'offline'
 
   loading.value = true
   try {
     if (userType === 'guest') {
-      await SetCurrentUser(id)
-      emit('login-success', {
-        username: name,
-        hasPassword: false,
-        type: 'guest',
-        isLocked: true
-      })
+      await SetCurrentUser(name)
+      emit('login-success', { username: name, hasPassword: false, type: 'guest', isLocked: true })
     } else if (userType === 'premium') {
       try {
-        await LoginUser(id, '')
-        emit('login-success', {
-          username: name,
-          hasPassword: false,
-          type: 'premium',
-          isLocked: false
-        })
+        await LoginUser(name, '')
+        emit('login-success', { username: name, hasPassword: false, type: 'premium', isLocked: false })
       } catch (e) {
-        // 令牌过期：弹窗提示并引导重新登录（显示登录码）
-        await showTokenExpiredDialog()
-      }
-    } else if (userType === 'external') {
-      // 外置用户：刷新令牌，过期则弹窗引导重新输入用户名密码
-      try {
-        await LoginUser(id, '')
-        emit('login-success', {
-          username: name,
-          hasPassword: false,
-          type: 'external',
-          isLocked: false
-        })
-      } catch (e) {
-        await showExternalTokenExpiredDialog(selectedUser.value)
+        error.value = t('login.premiumTokenExpired')
       }
     } else {
-      // 离线用户
-      await LoginUser(id, password.value)
-      const hasPwd = await UserHasPassword(id)
-      emit('login-success', {
-        username: name,
-        hasPassword: hasPwd,
-        type: 'offline',
-        isLocked: false
-      })
+      await LoginUser(name, password.value)
+      const hasPwd = await UserHasPassword(name)
+      emit('login-success', { username: name, hasPassword: hasPwd, type: 'offline', isLocked: false })
     }
   } catch (e) {
-    error.value = String(e).replace('Error: ', '')
+    error.value = cleanError(e)
   } finally {
     loading.value = false
   }
@@ -288,47 +258,27 @@ async function handleLogin() {
 
 function switchToCreateGuest() {
   mode.value = 'create-guest'
-  error.value = ''
-  username.value = ''
-  password.value = ''
-  confirmPassword.value = ''
-  securityPassword.value = ''
-  msLoginStep.value = ''
-  selectedUser.value = null
+  resetState()
 }
 
 function switchToCreateOffline() {
   mode.value = 'create-offline'
-  error.value = ''
-  username.value = ''
-  password.value = ''
-  confirmPassword.value = ''
-  securityPassword.value = ''
-  msLoginStep.value = ''
-  selectedUser.value = null
+  resetState()
 }
 
 function switchToCreatePremium() {
   mode.value = 'create-premium'
-  error.value = ''
-  username.value = ''
-  password.value = ''
-  securityPassword.value = ''
-  msLoginStep.value = ''
-  selectedUser.value = null
+  resetState()
 }
 
 function switchToCreateExternal() {
   mode.value = 'create-external'
-  error.value = ''
-  username.value = ''
-  password.value = ''
-  extServerURL.value = ''
-  extEmail.value = ''
-  extServerName.value = ''
-  extTemplate.value = 'custom'
-  msLoginStep.value = ''
-  selectedUser.value = null
+  resetState(true)
+}
+
+function switchToLogin() {
+  mode.value = 'login'
+  resetState()
 }
 
 // 外置登录模板切换
@@ -351,7 +301,9 @@ async function fetchExtServerName() {
     if (info && info.meta && info.meta.serverName) {
       extServerName.value = info.meta.serverName
     }
-  } catch {}
+  } catch (e) {
+    console.error('获取外置登录服务器信息失败:', e)
+  }
 }
 
 // 外置登录
@@ -373,11 +325,11 @@ async function handleExternalLogin() {
   loading.value = true
   try {
     const authData = await LoginYggdrasil(extServerURL.value.trim(), extEmail.value.trim(), password.value)
-    // 创建外置用户（返回用户标识 dir）
-    const dir = await CreateExternalUser(authData.username, authData)
-    await SetCurrentUser(dir)
-    // 预下载 authlib-injector（不阻塞登录流程）
-    DownloadAuthlibInjector().catch(() => {})
+    await CreateExternalUser(authData.username, authData)
+    await SetCurrentUser(authData.username)
+    DownloadAuthlibInjector().catch((e) => {
+      console.error('预下载 authlib-injector 失败:', e)
+    })
     emit('login-success', {
       username: authData.username,
       hasPassword: false,
@@ -386,20 +338,10 @@ async function handleExternalLogin() {
       serverName: authData.serverName || extServerName.value,
     })
   } catch (e) {
-    error.value = String(e).replace('Error: ', '')
+    error.value = cleanError(e)
   } finally {
     loading.value = false
   }
-}
-
-function switchToLogin() {
-  mode.value = 'login'
-  error.value = ''
-  username.value = ''
-  password.value = ''
-  securityPassword.value = ''
-  msLoginStep.value = ''
-  selectedUser.value = null
 }
 
 // 从右下角用户列表选择用户
@@ -412,128 +354,61 @@ function selectUser(user) {
   const userType = user.type || 'offline'
 
   if (userType === 'guest') {
-    // 访客用户直接登录
-    handleGuestQuickLogin(user)
+    handleGuestQuickLogin(user.username)
   } else if (userType === 'premium') {
-    // 正版用户尝试刷新令牌
-    handlePremiumQuickLogin(user)
+    handlePremiumQuickLogin(user.username)
   } else if (userType === 'external') {
-    // 外置用户尝试刷新令牌
-    handleExternalQuickLogin(user)
+    handleExternalQuickLogin(user.username)
   } else if (!user.hasPassword) {
-    // 无密码离线用户直接登录
-    handleQuickLogin(user)
+    handleQuickLogin(user.username)
   }
-  // 有密码的离线用户：只设置 selectedUser，等用户输入密码
 }
 
-// 注意：快速登录的参数是用户对象；后端调用用 dir（用户标识），显示用 username
-async function handleGuestQuickLogin(user) {
+async function handleGuestQuickLogin(name) {
   loading.value = true
   try {
-    await SetCurrentUser(user.dir || user.username)
-    emit('login-success', {
-      username: user.username,
-      hasPassword: false,
-      type: 'guest',
-      isLocked: true
-    })
+    await SetCurrentUser(name)
+    emit('login-success', { username: name, hasPassword: false, type: 'guest', isLocked: true })
   } catch (e) {
-    error.value = String(e).replace('Error: ', '')
+    error.value = cleanError(e)
   } finally {
     loading.value = false
   }
 }
 
-async function handlePremiumQuickLogin(user) {
+async function handlePremiumQuickLogin(name) {
   loading.value = true
   try {
-    await LoginUser(user.dir || user.username, '')
-    emit('login-success', {
-      username: user.username,
-      hasPassword: false,
-      type: 'premium',
-      isLocked: false
-    })
+    await LoginUser(name, '')
+    emit('login-success', { username: name, hasPassword: false, type: 'premium', isLocked: false })
   } catch (e) {
-    // 令牌过期：弹窗提示并引导重新登录（显示登录码）
+    error.value = t('login.premiumTokenExpiredReadd')
     selectedUser.value = null
-    await showTokenExpiredDialog()
   } finally {
     loading.value = false
   }
 }
 
-// 正版令牌过期弹窗：确认后走设备码登录流程，弹窗中显示登录码
-async function showTokenExpiredDialog() {
-  try {
-    const btn = await showQGLDialog({
-      theme: 'normal',
-      title: t('login.tokenExpiredTitle'),
-      content: t('login.tokenExpiredContent'),
-      btn1Label: t('login.tokenExpiredRelogin'),
-      btn2Label: t('app.cancel')
-    })
-    if (btn === 1) {
-      selectedUser.value = null
-      error.value = ''
-      handlePremiumLogin()
-    }
-  } catch {}
-}
-
-// 外置令牌过期弹窗：确认后进入外置登录表单重新输入用户名和密码（类似正版令牌过期流程）
-async function showExternalTokenExpiredDialog(user) {
-  try {
-    const btn = await showQGLDialog({
-      theme: 'normal',
-      title: t('login.externalTokenExpiredTitle'),
-      content: t('login.externalTokenExpiredContent'),
-      btn1Label: t('login.tokenExpiredRelogin'),
-      btn2Label: t('app.cancel')
-    })
-    if (btn === 1) {
-      selectedUser.value = null
-      error.value = ''
-      password.value = ''
-      // 预填该用户的验证服务器地址，重新登录会复用原用户目录（不重置配置）
-      if (user?.serverUrl) extServerURL.value = user.serverUrl
-      mode.value = 'create-external'
-    }
-  } catch {}
-}
-
-async function handleExternalQuickLogin(user) {
+async function handleExternalQuickLogin(name) {
   loading.value = true
   try {
-    await LoginUser(user.dir || user.username, '')
-    emit('login-success', {
-      username: user.username,
-      hasPassword: false,
-      type: 'external',
-      isLocked: false
-    })
+    await LoginUser(name, '')
+    emit('login-success', { username: name, hasPassword: false, type: 'external', isLocked: false })
   } catch (e) {
-    // 令牌过期：弹窗提示并引导重新输入用户名密码登录
+    error.value = t('login.externalTokenExpiredReadd')
     selectedUser.value = null
-    await showExternalTokenExpiredDialog(user)
   } finally {
     loading.value = false
   }
 }
 
-async function handleQuickLogin(user) {
+async function handleQuickLogin(name) {
   loading.value = true
   try {
-    await SetCurrentUser(user.dir || user.username)
-    emit('login-success', {
-      username: user.username,
-      hasPassword: false,
-      type: 'offline',
-      isLocked: false
-    })
+    await SetCurrentUser(name)
+    emit('login-success', { username: name, hasPassword: false, type: 'offline', isLocked: false })
   } catch (e) {
-    error.value = String(e).replace('Error: ', '')
+    error.value = cleanError(e)
   } finally {
     loading.value = false
   }
@@ -571,7 +446,7 @@ function getUserTypeLabel(type) {
         <template v-else-if="msLoginStep === 'polling'">
           <div class="ms-login-box fade-in">
             <div class="win11-avatar">
-              <svg class="spin" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#00BCD4" stroke-width="2.5" stroke-linecap="round"><path d="M12 2a10 10 0 0 1 10 10"/></svg>
+              <svg class="spin" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" stroke-width="2.5" stroke-linecap="round"><path d="M12 2a10 10 0 0 1 10 10"/></svg>
             </div>
             <div class="ms-progress">{{ msProgressMsg }}</div>
             <div class="ms-waiting">{{ t('login.connectingMicrosoft') }}</div>
@@ -579,14 +454,7 @@ function getUserTypeLabel(type) {
         </template>
         <!-- 普通登录界面 -->
         <template v-else>
-          <img
-            v-if="selectedUser && avatarMap[selectedUser.username]"
-            class="win11-avatar"
-            :class="selectedUser?.type || 'offline'"
-            :src="avatarMap[selectedUser.username]"
-            alt=""
-          />
-          <div v-else class="win11-avatar" :class="selectedUser?.type || 'offline'">
+          <div class="win11-avatar" :class="selectedUser?.type || 'offline'">
             {{ avatarLetter }}
           </div>
           <div class="win11-username">{{ displayName }}</div>
@@ -799,14 +667,7 @@ function getUserTypeLabel(type) {
           :class="{ active: selectedUser?.username === user.username }"
           @click="selectUser(user)"
         >
-          <img
-            v-if="avatarMap[user.username]"
-            class="win11-chip-avatar"
-            :class="user.type"
-            :src="avatarMap[user.username]"
-            alt=""
-          />
-          <div v-else class="win11-chip-avatar" :class="user.type">{{ user.username.charAt(0).toUpperCase() }}</div>
+          <div class="win11-chip-avatar" :class="user.type">{{ user.username.charAt(0).toUpperCase() }}</div>
           <span class="win11-chip-name">{{ user.username }}</span>
           <span class="win11-chip-type" :class="user.type || 'offline'">{{ getUserTypeLabel(user.type) }}</span>
         </div>
@@ -815,10 +676,6 @@ function getUserTypeLabel(type) {
       <button class="win11-corner-btn" @click="switchToCreateGuest">
         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         <span>{{ t('login.registerUser') }}</span>
-      </button>
-      <button class="win11-corner-btn" @click="emit('navigate-migrate')">
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
-        <span>{{ t('login.migrateData') }}</span>
       </button>
       </div>
     </div>
@@ -856,30 +713,21 @@ function getUserTypeLabel(type) {
   max-width: 380px;
   padding: 32px 28px;
   border-radius: 16px;
-  background: rgba(255, 255, 255, 0.88);
+  background: var(--glass-bg-heavy);
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
-  border: 1px solid rgba(255, 255, 255, 0.4);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--glass-shadow);
+  transition: background 0.3s;
 }
 
 /* ===== 头像 ===== */
-/* 真实头像（img）：无背景容器，透明显不规则形状 */
-img.win11-avatar,
-img.win11-chip-avatar {
-  background: transparent;
-  box-shadow: none;
-  border: none;
-}
-
 .win11-avatar {
   width: 120px;
   height: 120px;
-  border-radius: 12px;
-  object-fit: cover;
-  flex-shrink: 0;
-  background: #E0F7FA;
-  color: #0097A7;
+  border-radius: 50%;
+  background: var(--primary-light);
+  color: var(--primary-dark);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -891,32 +739,32 @@ img.win11-chip-avatar {
 }
 
 .win11-avatar.premium {
-  background: #E8EAF6;
+  background: color-mix(in srgb, #283593 15%, transparent);
   color: #283593;
 }
 
 .win11-avatar.guest {
-  background: #FFF3E0;
+  background: color-mix(in srgb, #E65100 15%, transparent);
   color: #E65100;
 }
 
 .win11-avatar.create-mode {
-  background: #E0F7FA;
-  color: #0097A7;
+  background: var(--primary-light);
+  color: var(--primary-dark);
 }
 
 /* ===== 用户名 ===== */
 .win11-username {
   font-size: 20px;
   font-weight: 400;
-  color: #333333;
+  color: var(--text);
   margin-bottom: 4px;
 }
 
 /* ===== 提示文字 ===== */
 .win11-hint {
   font-size: 14px;
-  color: #999999;
+  color: var(--text-light);
   margin-top: 4px;
 }
 
@@ -931,40 +779,33 @@ img.win11-chip-avatar {
 
 .win11-input {
   padding: 10px 14px;
-  border: 2px solid #E0E0E0;
+  border: 2px solid var(--border);
   border-radius: 4px 0 0 4px;
   font-size: 14px;
   outline: none;
   background: var(--glass-bg-heavy);
-  color: #333333;
+  color: var(--text);
   transition: border-color 0.15s;
 }
 
-.win11-input:focus {
-  border-color: #00BCD4;
-}
-
-.win11-input::placeholder {
-  color: #BBBBBB;
-}
+.win11-input:focus { border-color: var(--primary); }
+.win11-input::placeholder { color: var(--text-light); }
 
 .win11-input-block {
   width: 100%;
   border-radius: 4px;
-  border: 2px solid #E0E0E0;
+  border: 2px solid var(--border);
 }
 
-.win11-input-block:focus {
-  border-color: #00BCD4;
-}
+.win11-input-block:focus { border-color: var(--primary); }
 
 .win11-submit-btn {
   height: 40px;
   padding: 0 14px;
-  border: 2px solid #00BCD4;
+  border: 2px solid var(--primary);
   border-left: none;
   border-radius: 0 4px 4px 0;
-  background: #00BCD4;
+  background: var(--primary);
   color: white;
   cursor: pointer;
   display: flex;
@@ -975,8 +816,8 @@ img.win11-chip-avatar {
 }
 
 .win11-submit-btn:hover {
-  background: #0097A7;
-  border-color: #0097A7;
+  background: var(--primary-dark);
+  border-color: var(--primary-dark);
 }
 
 .win11-submit-btn:disabled {
@@ -988,9 +829,9 @@ img.win11-chip-avatar {
 .win11-login-btn {
   width: 240px;
   padding: 10px 0;
-  border: 2px solid #00BCD4;
+  border: 2px solid var(--primary);
   border-radius: 4px;
-  background: #00BCD4;
+  background: var(--primary);
   color: white;
   font-size: 14px;
   font-weight: 500;
@@ -1000,8 +841,8 @@ img.win11-chip-avatar {
 }
 
 .win11-login-btn:hover {
-  background: #0097A7;
-  border-color: #0097A7;
+  background: var(--primary-dark);
+  border-color: var(--primary-dark);
 }
 
 .win11-login-btn:disabled {
@@ -1013,7 +854,7 @@ img.win11-chip-avatar {
 .win11-type-tabs {
   display: flex;
   gap: 0;
-  border: 2px solid #E0E0E0;
+  border: 2px solid var(--border);
   border-radius: 4px;
   overflow: hidden;
   margin-top: 4px;
@@ -1023,26 +864,17 @@ img.win11-chip-avatar {
   padding: 8px 20px;
   border: none;
   background: var(--glass-bg-heavy);
-  color: #666666;
+  color: var(--text-secondary);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
   transition: all 0.15s;
-  border-right: 1px solid #E0E0E0;
+  border-right: 1px solid var(--border);
 }
 
-.win11-type-tab:last-child {
-  border-right: none;
-}
-
-.win11-type-tab.active {
-  background: #00BCD4;
-  color: white;
-}
-
-.win11-type-tab:hover:not(.active) {
-  background: var(--glass-bg);
-}
+.win11-type-tab:last-child { border-right: none; }
+.win11-type-tab.active { background: var(--primary); color: white; }
+.win11-type-tab:hover:not(.active) { background: var(--glass-bg); }
 
 /* ===== 创建模式表单 ===== */
 .win11-form {
@@ -1051,17 +883,17 @@ img.win11-chip-avatar {
   gap: 10px;
   width: 240px;
   margin-top: 4px;
-  background: rgba(255, 255, 255, 0.65);
+  background: var(--glass-bg);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border-radius: 12px;
   padding: 16px;
-  border: 1px solid rgba(255, 255, 255, 0.3);
+  border: 1px solid var(--glass-border);
 }
 
 .win11-form-hint {
   font-size: 12px;
-  color: #999999;
+  color: var(--text-light);
   text-align: center;
 }
 
@@ -1074,40 +906,40 @@ img.win11-chip-avatar {
 .ext-template-btn {
   flex: 1;
   padding: 6px 10px;
-  border: 1.5px solid #E0E0E0;
+  border: 1.5px solid var(--border);
   border-radius: 6px;
   background: var(--glass-bg-heavy);
-  color: #666666;
+  color: var(--text-secondary);
   font-size: 12px;
   cursor: pointer;
   transition: all 0.15s;
 }
 
 .ext-template-btn.active {
-  border-color: #00BCD4;
-  color: #00BCD4;
-  background: rgba(0, 188, 212, 0.08);
+  border-color: var(--primary);
+  color: var(--primary);
+  background: var(--primary-bg);
 }
 
 .ext-template-btn:hover:not(.active) {
-  border-color: #B0BEC5;
+  border-color: var(--text-light);
 }
 
 .ext-server-name {
   font-size: 12px;
-  color: #00BCD4;
+  color: var(--primary);
   text-align: center;
   margin-top: -4px;
 }
 
 /* ===== 错误信息 ===== */
 .win11-error {
-  background: rgba(255, 235, 238, 0.9);
-  color: #F44336;
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
   padding: 8px 16px;
   border-radius: 6px;
   font-size: 13px;
-  border: 1px solid #FFCDD2;
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
   text-align: center;
   width: 100%;
   backdrop-filter: blur(8px);
@@ -1117,51 +949,49 @@ img.win11-chip-avatar {
 /* ===== 正版登录 ===== */
 .premium-info {
   text-align: center;
-  padding: 8px 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 8px;
-  background: rgba(255, 255, 255, 0.75);
+  background: var(--glass-bg);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border-radius: 12px;
   padding: 20px 16px;
-  border: 1px solid rgba(255, 255, 255, 0.3);
+  border: 1px solid var(--glass-border);
 }
 
 .premium-desc {
   font-size: 14px;
-  color: #333333;
+  color: var(--text);
   font-weight: 500;
 }
 
 .premium-hint {
   font-size: 12px;
-  color: #999999;
+  color: var(--text-light);
   line-height: 1.5;
   max-width: 260px;
 }
 
 .ms-login-box {
   text-align: center;
-  padding: 12px 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 10px;
-  background: rgba(255, 255, 255, 0.75);
+  background: var(--glass-bg);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border-radius: 12px;
   padding: 20px 16px;
-  border: 1px solid rgba(255, 255, 255, 0.3);
+  border: 1px solid var(--glass-border);
 }
 
 .ms-auto-hint {
   display: inline-block;
-  background: #E8F5E9;
-  color: #2E7D32;
+  background: color-mix(in srgb, var(--success) 15%, transparent);
+  color: var(--success);
   padding: 5px 14px;
   border-radius: 4px;
   font-size: 12px;
@@ -1171,36 +1001,36 @@ img.win11-chip-avatar {
 .ms-step-title {
   font-size: 16px;
   font-weight: 600;
-  color: #333333;
+  color: var(--text);
 }
 
 .ms-step-desc {
   font-size: 13px;
-  color: #666666;
+  color: var(--text-secondary);
   text-align: left;
   width: 100%;
 }
 
 .ms-url-box {
   background: var(--glass-bg);
-  border: 1px solid #E0E0E0;
+  border: 1px solid var(--border);
   border-radius: 4px;
   padding: 8px 12px;
   font-size: 13px;
-  color: #0097A7;
+  color: var(--primary-dark);
   word-break: break-all;
   font-family: monospace;
   width: 100%;
 }
 
 .ms-code-box {
-  background: #E0F7FA;
-  border: 2px solid #00BCD4;
+  background: var(--primary-light);
+  border: 2px solid var(--primary);
   border-radius: 4px;
   padding: 12px;
   font-size: 24px;
   font-weight: 700;
-  color: #0097A7;
+  color: var(--primary-dark);
   letter-spacing: 4px;
   font-family: monospace;
   width: 100%;
@@ -1209,13 +1039,13 @@ img.win11-chip-avatar {
 
 .ms-progress {
   font-size: 13px;
-  color: #00BCD4;
+  color: var(--primary);
   font-weight: 500;
 }
 
 .ms-waiting {
   font-size: 12px;
-  color: #999999;
+  color: var(--text-light);
 }
 
 /* ===== 左下角：用户列表 + 注册按钮 ===== */
@@ -1236,10 +1066,10 @@ img.win11-chip-avatar {
   gap: 8px;
   padding: 10px 14px;
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.82);
+  background: var(--glass-bg-heavy);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
-  border: 1px solid rgba(255, 255, 255, 0.35);
+  border: 1px solid var(--glass-border);
 }
 
 .win11-corner-btn {
@@ -1247,12 +1077,12 @@ img.win11-chip-avatar {
   align-items: center;
   gap: 8px;
   padding: 8px 16px;
-  border: 1px solid #E0E0E0;
+  border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--glass-bg-heavy);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
-  color: #333333;
+  color: var(--text);
   font-size: 13px;
   font-weight: 400;
   cursor: pointer;
@@ -1260,12 +1090,12 @@ img.win11-chip-avatar {
 }
 
 .win11-corner-btn:hover {
-  background: #F5F5F5;
-  border-color: #CCCCCC;
+  background: var(--bg-card);
+  border-color: var(--text-light);
 }
 
 .win11-corner-btn:active {
-  background: #EEEEEE;
+  background: var(--bg-secondary);
 }
 
 /* ===== 右下角用户列表 ===== */
@@ -1282,7 +1112,7 @@ img.win11-chip-avatar {
   align-items: center;
   gap: 10px;
   padding: 8px 14px;
-  border: 1px solid #E0E0E0;
+  border: 1px solid var(--border);
   border-radius: 4px;
   background: var(--glass-bg-heavy);
   backdrop-filter: blur(12px);
@@ -1294,22 +1124,20 @@ img.win11-chip-avatar {
 
 .win11-user-chip:hover {
   background: var(--glass-bg);
-  border-color: #CCCCCC;
+  border-color: var(--text-light);
 }
 
 .win11-user-chip.active {
-  border-color: #00BCD4;
+  border-color: var(--primary);
   background: var(--primary-bg);
 }
 
 .win11-chip-avatar {
   width: 32px;
   height: 32px;
-  border-radius: 6px;
-  object-fit: cover;
-  flex-shrink: 0;
-  background: #E0F7FA;
-  color: #0097A7;
+  border-radius: 50%;
+  background: var(--primary-light);
+  color: var(--primary-dark);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1319,19 +1147,24 @@ img.win11-chip-avatar {
 }
 
 .win11-chip-avatar.premium {
-  background: #E8EAF6;
+  background: color-mix(in srgb, #283593 15%, transparent);
   color: #283593;
 }
 
 .win11-chip-avatar.guest {
-  background: #FFF3E0;
+  background: color-mix(in srgb, #E65100 15%, transparent);
   color: #E65100;
+}
+
+.win11-chip-avatar.external {
+  background: color-mix(in srgb, #2E7D32 15%, transparent);
+  color: #2E7D32;
 }
 
 .win11-chip-name {
   font-size: 13px;
   font-weight: 500;
-  color: #333333;
+  color: var(--text);
 }
 
 .win11-chip-type {
@@ -1342,33 +1175,28 @@ img.win11-chip-avatar {
 }
 
 .win11-chip-type.guest {
-  background: #FFF3E0;
+  background: color-mix(in srgb, #E65100 15%, transparent);
   color: #E65100;
 }
 
 .win11-chip-type.offline {
-  background: #E8F5E9;
+  background: color-mix(in srgb, #2E7D32 15%, transparent);
   color: #2E7D32;
 }
 
 .win11-chip-type.premium {
-  background: #E8EAF6;
+  background: color-mix(in srgb, #283593 15%, transparent);
   color: #283593;
 }
 
 .win11-chip-type.external {
-  background: #E8F5E9;
-  color: #2E7D32;
-}
-
-.win11-chip-avatar.external {
-  background: #E8F5E9;
+  background: color-mix(in srgb, #2E7D32 15%, transparent);
   color: #2E7D32;
 }
 
 .win11-no-users {
   font-size: 13px;
-  color: #999999;
+  color: var(--text-light);
   padding: 8px 14px;
 }
 

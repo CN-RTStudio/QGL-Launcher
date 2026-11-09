@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 func streamVerifiedDownload(ctx context.Context, url, destPath string, opts secureDownloadOptions) (*secureDownloadResult, error) {
@@ -53,26 +52,18 @@ func streamVerifiedDownload(ctx context.Context, url, destPath string, opts secu
 		return nil, fmt.Errorf("拒绝写入符号链接或非普通文件: %s", destPath)
 	}
 
-	var lastErr error
-	for attempt := 1; attempt <= attempts; attempt++ {
-		res, fatal, err := attemptSecureDownload(ctx, client, url, destPath, opts)
-		if err == nil {
-			res.Attempts = attempt
-			return res, nil
-		}
-		lastErr = err
-		// fatal 表示重试没有意义（超限 / 哈希不符 / 4xx），直接返回。
-		if fatal || attempt == attempts {
-			return nil, err
-		}
-		backoff := secureDownloadBackoffBase << uint(attempt-1)
-		select {
-		case <-time.After(backoff):
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+	var res *secureDownloadResult
+	// fatal 表示重试没有意义（超限 / 哈希不符 / 4xx），由内核直接返回。
+	used, err := runWithRetry(ctx, attempts, secureDownloadBackoffBase, func() (bool, error) {
+		r, fatal, e := attemptSecureDownload(ctx, client, url, destPath, opts)
+		res = r
+		return fatal, e
+	})
+	if err != nil {
+		return nil, err
 	}
-	return nil, lastErr
+	res.Attempts = used
+	return res, nil
 }
 
 // attemptSecureDownload 是单次尝试。返回 fatal=true 表示错误不可重试。

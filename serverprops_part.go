@@ -53,7 +53,7 @@ func updateServerProperty(path, key, value string, valueValidator func(string) e
 	props.Set(key, value)
 
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, props.Marshal(), allowedFilePerm); err != nil {
+	if err := secureWriteFile(tmp, props.Marshal(), allowedFilePerm); err != nil {
 		return fmt.Errorf("写入临时配置失败: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
@@ -97,7 +97,7 @@ func writeInitialServerProperties(path string, port int, onlineMode bool, motd s
 	props.Set("motd", motd)
 
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, props.Marshal(), allowedFilePerm); err != nil {
+	if err := secureWriteFile(tmp, props.Marshal(), allowedFilePerm); err != nil {
 		return fmt.Errorf("写入临时配置失败: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {

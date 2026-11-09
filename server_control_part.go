@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // SetServerOnlineMode 设置服务器正版验证
@@ -132,7 +131,10 @@ func (a *App) DeleteServer(name string) error {
 	if serverMgr.status.Running && serverMgr.status.Name == name {
 		serverMgr.mu.Unlock()
 		a.StopServer()
-		time.Sleep(1 * time.Second)
+		if !waitForServerStop(serverStillRunning, serverExitWaitTimeout, serverExitPollInterval) {
+			a.writeSecurityLog("删除服务器前进程未在超时内退出，拒绝删除目录: " + name)
+			return fmt.Errorf("服务器进程仍在退出中，拒绝删除")
+		}
 	} else {
 		serverMgr.mu.Unlock()
 	}

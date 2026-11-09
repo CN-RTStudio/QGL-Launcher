@@ -70,7 +70,7 @@ func (a *App) ExportModsAuditReport(versionID, format string) (string, string, e
 	fileName := modAuditReportPrefix +
 		strings.ReplaceAll(now, ":", "-") + ext
 	fullPath := filepath.Join(dir, fileName)
-	if err := os.WriteFile(fullPath, body, 0o600); err != nil {
+	if err := secureWritePrivateFile(fullPath, body); err != nil {
 		recordSecurityEvent(auditCategoryJarScan, auditSeverityWarn, auditActionDetected,
 			"mods-audit", "mods 审计报告导出失败")
 		return "", "", modAuditError("mods 审计报告导出失败")

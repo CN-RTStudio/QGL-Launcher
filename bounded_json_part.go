@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"time"
 )
 
 // fetchJSONBounded 拉取单个 HTTPS URL 上的 JSON 并反序列化到 out。
@@ -32,24 +31,10 @@ func fetchJSONBounded(ctx context.Context, rawURL string, out any, opts jsonFetc
 		label = "JSON 元数据"
 	}
 
-	var lastErr error
-	for attempt := 1; attempt <= attempts; attempt++ {
-		fatal, err := attemptJSONFetch(ctx, client, rawURL, out, opts, label)
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		if fatal || attempt == attempts {
-			return err
-		}
-		backoff := jsonFetchBackoffBase << uint(attempt-1)
-		select {
-		case <-time.After(backoff):
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	return lastErr
+	_, err := runWithRetry(ctx, attempts, jsonFetchBackoffBase, func() (bool, error) {
+		return attemptJSONFetch(ctx, client, rawURL, out, opts, label)
+	})
+	return err
 }
 
 // attemptJSONFetch 是单次尝试。

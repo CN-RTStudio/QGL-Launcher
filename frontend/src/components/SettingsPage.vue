@@ -1,28 +1,33 @@
 <script setup>
-import { ref, onMounted, computed, watch } from 'vue'
+import { ref, onMounted, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import i18n from '../i18n/index.js'
 import {
   GetGlobalConfig, SaveGlobalConfig, IsVersionIsolation,
-  SetVersionIsolation, GetCurrentUser, GetUsers, LockGuest,
+  SetVersionIsolation, GetUsers,
   SearchJava, GetJavaInfo, GetMinecraftDir,
   GetThemeColor, SetThemeColor, GetBackgroundImageDataURL, SetBackgroundImage, SelectBackgroundImage,
-  GetBingDailyImage, GetCachedBingImage, GetLauncherVersion,
+  GetBingDailyImage,
   IsPortableMode, SetPortableMode, GetPortableJavaPath, GetPortableJavaInfo,
-  GetShowExportLaunchCommand, SetShowExportLaunchCommand,
-  SetUserPassword, DeleteCurrentUser, GetGuestPermissions, SetGuestPermissions,
+  GetShowExportLaunchCommand, SetShowExportLaunchCommand
 } from '../../wailsjs/go/main/App.js'
-import { showQGLDialog } from '../composables/qglDialog.js'
-import { useAvatars } from '../composables/avatar.js'
 import logoImg from '../assets/images/logo.jpg'
+
+const APP_VERSION = '1.0.0-rc.2'
+const MIN_MEM = 1
+const MAX_MEM = 32
 
 const props = defineProps({
   currentUser: Object
 })
 
-const emit = defineEmits(['navigate', 'logout', 'show-license', 'user-locked'])
+const emit = defineEmits(['navigate', 'logout', 'show-license'])
 
 const { t } = useI18n()
+
+function cleanError(e) {
+  return String(e).replace('Error: ', '')
+}
 
 const activeSection = ref('general')
 
@@ -36,31 +41,25 @@ const versionIsolation = ref(false)
 const minecraftDir = ref('')
 const saving = ref(false)
 const saveMsg = ref('')
+const saveError = ref(false)
 const users = ref([])
 const themeColor = ref('cyan')
+const darkMode = ref(false)
 const backgroundImage = ref('')
 const bingLoading = ref(false)
-const launcherVersion = ref('')
-
-// 真实头像（皮肤脸）
-const { avatarMap, loadAvatar } = useAvatars()
-watch(() => props.currentUser, (u) => { if (u) loadAvatar(u) }, { immediate: true })
-watch(users, (list) => { (list || []).forEach(u => loadAvatar(u)) })
 
 const sections = computed(() => [
-  { id: 'general', label: t('settings.general'), icon: '&#x2699;' },
-  { id: 'personalize', label: t('settings.personalize'), icon: '&#x1F3A8;' },
-  { id: 'other', label: t('settings.other'), icon: '&#x1F4E6;' },
-  { id: 'user', label: t('settings.user'), icon: '&#x1F464;' },
-  { id: 'about', label: t('settings.about'), icon: '&#x2139;' },
+  { id: 'general', label: t('settings.general'), icon: '⚙' },
+  { id: 'personalize', label: t('settings.personalize'), icon: '🎨' },
+  { id: 'other', label: t('settings.other'), icon: '📦' },
+  { id: 'user', label: t('settings.user'), icon: '👤' },
+  { id: 'about', label: t('settings.about'), icon: 'ℹ' },
 ])
 
-// 便携版相关
 const portableMode = ref(false)
 const portableJavaPath = ref('')
 const portableJavaInfo = ref(null)
 
-// 语言切换
 const currentLocale = ref(localStorage.getItem('qgl-locale') || 'zh-CN')
 const languageOptions = [
   { value: 'zh-CN', label: '简体中文' },
@@ -74,25 +73,36 @@ function changeLanguage(locale) {
   localStorage.setItem('qgl-locale', locale)
 }
 
-// 导出启动命令按钮
 const showExportLaunchCommand = ref(false)
 
 async function toggleExportLaunchCommand() {
   try {
     await SetShowExportLaunchCommand(showExportLaunchCommand.value)
-  } catch {
+  } catch (error) {
+    console.error('切换导出启动命令设置失败:', error)
     showExportLaunchCommand.value = !showExportLaunchCommand.value
   }
 }
 
+function toggleDarkMode() {
+  const root = document.documentElement
+  if (darkMode.value) {
+    root.setAttribute('data-mode', 'dark')
+    localStorage.setItem('qgl-dark-mode', 'true')
+  } else {
+    root.removeAttribute('data-mode')
+    localStorage.setItem('qgl-dark-mode', 'false')
+  }
+}
+
 onMounted(async () => {
-  // 并行加载配置数据
+  darkMode.value = localStorage.getItem('qgl-dark-mode') === 'true'
+  if (darkMode.value) {
+    document.documentElement.setAttribute('data-mode', 'dark')
+  }
+
   const [configResult, isolationResult, usersResult, themeResult, bgResult] = await Promise.allSettled([
-    GetGlobalConfig(),
-    IsVersionIsolation(),
-    GetUsers(),
-    GetThemeColor(),
-    GetBackgroundImageDataURL()
+    GetGlobalConfig(), IsVersionIsolation(), GetUsers(), GetThemeColor(), GetBackgroundImageDataURL()
   ])
 
   if (configResult.status === 'fulfilled' && configResult.value) {
@@ -102,48 +112,20 @@ onMounted(async () => {
     minMemory.value = config.minMemory || 1
     minecraftDir.value = config.minecraftDir || ''
   }
+  if (isolationResult.status === 'fulfilled') versionIsolation.value = isolationResult.value
+  if (usersResult.status === 'fulfilled' && usersResult.value) users.value = usersResult.value
+  if (themeResult.status === 'fulfilled') themeColor.value = themeResult.value
+  if (bgResult.status === 'fulfilled' && bgResult.value) backgroundImage.value = bgResult.value
 
-  if (isolationResult.status === 'fulfilled') {
-    versionIsolation.value = isolationResult.value
-  }
+  try { portableMode.value = await IsPortableMode() } catch (e) { console.error('获取便携模式状态失败:', e) }
+  try { portableJavaPath.value = await GetPortableJavaPath() } catch (e) { console.error('获取便携Java路径失败:', e) }
+  try { portableJavaInfo.value = await GetPortableJavaInfo() } catch (e) { console.error('获取便携Java信息失败:', e) }
+  try { showExportLaunchCommand.value = await GetShowExportLaunchCommand() } catch (e) { console.error('获取导出启动命令设置失败:', e) }
 
-  if (usersResult.status === 'fulfilled' && usersResult.value) {
-    users.value = usersResult.value
-  }
-
-  if (themeResult.status === 'fulfilled') {
-    themeColor.value = themeResult.value
-  }
-
-  if (bgResult.status === 'fulfilled' && bgResult.value) {
-    backgroundImage.value = bgResult.value
-  }
-
-  // 加载便携版设置
-  try { portableMode.value = await IsPortableMode() } catch {}
-  try { portableJavaPath.value = await GetPortableJavaPath() } catch {}
-  try {
-    const info = await GetPortableJavaInfo()
-    portableJavaInfo.value = info
-  } catch {}
-
-  // 加载导出启动命令按钮设置
-  try { showExportLaunchCommand.value = await GetShowExportLaunchCommand() } catch {}
-
-  // 加载访客权限
-  loadGuestPerms()
-
-  // 加载启动器版本
-  try { launcherVersion.value = await GetLauncherVersion() } catch {}
-
-  // 延迟搜索 Java（最慢的操作，不阻塞页面显示）
   searchJavaList()
 
-  // 检查当前设置的 Java 信息
   if (javaPath.value) {
-    try {
-      javaInfo.value = await GetJavaInfo(javaPath.value)
-    } catch {}
+    try { javaInfo.value = await GetJavaInfo(javaPath.value) } catch (e) { console.error('获取Java信息失败:', e) }
   }
 })
 
@@ -151,7 +133,8 @@ async function searchJavaList() {
   searchingJava.value = true
   try {
     javaList.value = await SearchJava() || []
-  } catch {
+  } catch (e) {
+    console.error('搜索Java失败:', e)
     javaList.value = []
   } finally {
     searchingJava.value = false
@@ -161,25 +144,20 @@ async function searchJavaList() {
 async function togglePortableMode() {
   try {
     await SetPortableMode(portableMode.value)
-    // 刷新便携版 Java 信息
-    try {
-      const info = await GetPortableJavaInfo()
-      portableJavaInfo.value = info
-    } catch {
+    try { portableJavaInfo.value = await GetPortableJavaInfo() } catch (e) {
+      console.error('获取便携Java信息失败:', e)
       portableJavaInfo.value = null
     }
   } catch (e) {
-    portableMode.value = !portableMode.value // 恢复开关状态
+    console.error('切换便携模式失败:', e)
+    portableMode.value = !portableMode.value
   }
 }
 
 function selectJava(path) {
   javaPath.value = path
-  // 更新 Java 信息
   const found = javaList.value.find(j => j.path === path)
-  if (found) {
-    javaInfo.value = found
-  }
+  if (found) javaInfo.value = found
 }
 
 function clearJavaPath() {
@@ -192,26 +170,41 @@ function clearMinecraftDir() {
 }
 
 async function resetMinecraftDir() {
-  try {
-    minecraftDir.value = await GetMinecraftDir()
-  } catch {}
+  try { minecraftDir.value = await GetMinecraftDir() } catch (e) {
+    console.error('获取默认Minecraft目录失败:', e)
+  }
+}
+
+function clampMem(v, fallback) {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n < MIN_MEM) return fallback
+  return Math.min(Math.floor(n), MAX_MEM)
 }
 
 async function saveSettings() {
   saving.value = true
   saveMsg.value = ''
+  saveError.value = false
   try {
+    let minMem = clampMem(minMemory.value, 1)
+    let maxMem = clampMem(maxMemory.value, 2)
+    if (minMem > maxMem) [minMem, maxMem] = [maxMem, minMem]
+    minMemory.value = minMem
+    maxMemory.value = maxMem
+
     const config = await GetGlobalConfig()
     config.javaPath = javaPath.value
-    config.maxMemory = maxMemory.value
-    config.minMemory = minMemory.value
+    config.maxMemory = maxMem
+    config.minMemory = minMem
     config.minecraftDir = minecraftDir.value
     await SaveGlobalConfig(config)
     await SetVersionIsolation(versionIsolation.value)
     saveMsg.value = t('settings.settingsSaved')
     setTimeout(() => { saveMsg.value = '' }, 2000)
   } catch (e) {
-    saveMsg.value = t('settings.saveFailed') + String(e).replace('Error: ', '')
+    console.error('保存设置失败:', e)
+    saveError.value = true
+    saveMsg.value = t('settings.saveFailed') + cleanError(e)
   } finally {
     saving.value = false
   }
@@ -229,9 +222,12 @@ const themeColors = [
 
 async function changeThemeColor(color) {
   themeColor.value = color
-  try { await SetThemeColor(color) } catch {}
-  // Update parent data-theme attribute
-  document.querySelector('[data-theme]')?.setAttribute('data-theme', color)
+  try {
+    await SetThemeColor(color)
+    document.querySelector('[data-theme]')?.setAttribute('data-theme', color)
+  } catch (e) {
+    console.error('切换主题颜色失败:', e)
+  }
 }
 
 async function selectBgImage() {
@@ -239,28 +235,27 @@ async function selectBgImage() {
     const path = await SelectBackgroundImage()
     if (path) {
       backgroundImage.value = path
-      // 保存路径到用户配置，同时获取 data URL 用于显示
       await SetBackgroundImage(path)
-      // 重新获取 data URL（后端会读取文件并返回 base64）
       const url = await GetBackgroundImageDataURL()
       if (url) backgroundImage.value = url
     }
-  } catch {}
+  } catch (e) {
+    console.error('选择背景图片失败:', e)
+  }
 }
 
 async function resetBgImage() {
   backgroundImage.value = ''
-  try { await SetBackgroundImage('') } catch {}
+  try { await SetBackgroundImage('') } catch (e) { console.error('重置背景图片失败:', e) }
 }
 
 async function fetchBingDailyImage() {
   bingLoading.value = true
   try {
     const url = await GetBingDailyImage()
-    if (url) {
-      backgroundImage.value = url
-    }
+    if (url) backgroundImage.value = url
   } catch (e) {
+    console.error('获取Bing每日图片失败:', e)
   } finally {
     bingLoading.value = false
   }
@@ -270,120 +265,8 @@ function handleLogout() {
   emit('logout')
 }
 
-// ===== 用户管理 =====
-const pwdForm = ref({ oldPassword: '', newPassword: '', confirmPassword: '' })
-const pwdSaving = ref(false)
-const deletePassword = ref('')
-const userManageMsg = ref('')
-
-function setUserMsg(msg) {
-  userManageMsg.value = msg
-  setTimeout(() => { userManageMsg.value = '' }, 3000)
-}
-
-async function saveUserPassword() {
-  if (props.currentUser?.hasPassword && !pwdForm.value.oldPassword) {
-    setUserMsg(t('settings.needOldPassword'))
-    return
-  }
-  if (!pwdForm.value.newPassword) {
-    setUserMsg(t('settings.enterNewPassword'))
-    return
-  }
-  if (pwdForm.value.newPassword !== pwdForm.value.confirmPassword) {
-    setUserMsg(t('settings.passwordMismatch'))
-    return
-  }
-  pwdSaving.value = true
-  try {
-    await SetUserPassword(pwdForm.value.oldPassword, pwdForm.value.newPassword)
-    pwdForm.value = { oldPassword: '', newPassword: '', confirmPassword: '' }
-    // 密码已变更，回到切换用户界面重新进入
-    emit('logout')
-  } catch (e) {
-    setUserMsg(String(e).replace('Error: ', ''))
-  } finally {
-    pwdSaving.value = false
-  }
-}
-
-async function clearUserPassword() {
-  if (!pwdForm.value.oldPassword) {
-    setUserMsg(t('settings.needOldPasswordRemove'))
-    return
-  }
-  pwdSaving.value = true
-  try {
-    await SetUserPassword(pwdForm.value.oldPassword, '')
-    pwdForm.value = { oldPassword: '', newPassword: '', confirmPassword: '' }
-    // 密码已清除，回到切换用户界面重新进入
-    emit('logout')
-  } catch (e) {
-    setUserMsg(String(e).replace('Error: ', ''))
-  } finally {
-    pwdSaving.value = false
-  }
-}
-
-async function confirmDeleteAccount() {
-  if (props.currentUser?.hasPassword && !deletePassword.value) {
-    setUserMsg(t('settings.enterAccountPassword'))
-    return
-  }
-  const btnIndex = await showQGLDialog({
-    title: t('settings.deleteConfirmTitle'),
-    content: t('settings.deleteConfirmContent').replace('{name}', props.currentUser?.username || ''),
-    btn1Label: t('settings.deleteConfirmYes'),
-    btn2Label: t('settings.deleteConfirmNo'),
-  })
-  if (btnIndex !== 1) return
-  try {
-    await DeleteCurrentUser(deletePassword.value)
-    emit('logout') // 删除成功，回到登录页
-  } catch (e) {
-    setUserMsg(String(e).replace('Error: ', ''))
-  }
-}
-
-// ===== 访客权限管理 =====
-const guestPerms = ref({
-  allowDownload: true, allowMod: true, allowEasyQGL: true, allowSettings: true, allowQGLPlus: true, allowHelper: true,
-})
-const guestPermItems = computed(() => [
-  { key: 'allowDownload', label: t('settings.permDownload'), desc: t('settings.permDownloadDesc'), value: guestPerms.value.allowDownload },
-  { key: 'allowMod', label: t('settings.permMod'), desc: t('settings.permModDesc'), value: guestPerms.value.allowMod },
-  { key: 'allowEasyQGL', label: t('settings.permEasyQGL'), desc: t('settings.permEasyQGLDesc'), value: guestPerms.value.allowEasyQGL },
-  { key: 'allowSettings', label: t('settings.permSettings'), desc: t('settings.permSettingsDesc'), value: guestPerms.value.allowSettings },
-  { key: 'allowQGLPlus', label: t('settings.permQGLPlus'), desc: t('settings.permQGLPlusDesc'), value: guestPerms.value.allowQGLPlus },
-  { key: 'allowHelper', label: t('settings.permHelper'), desc: t('settings.permHelperDesc'), value: guestPerms.value.allowHelper },
-])
-
-// 锁定访客（解锁后点击可重新锁定）
-async function lockGuestUser() {
-  try {
-    await LockGuest()
-    emit('user-locked')
-  } catch (e) {
-    setUserMsg(String(e).replace('Error: ', ''))
-  }
-}
-
-async function loadGuestPerms() {
-  if (props.currentUser?.type !== 'guest') return
-  try {
-    const perms = await GetGuestPermissions()
-    if (perms) guestPerms.value = perms
-  } catch {}
-}
-
-async function toggleGuestPerm(key) {
-  const old = guestPerms.value[key]
-  guestPerms.value[key] = !old
-  try {
-    await SetGuestPermissions(guestPerms.value)
-  } catch {
-    guestPerms.value[key] = old
-  }
+function goBack() {
+  emit('navigate', 'main')
 }
 
 const currentUserType = computed(() => {
@@ -403,16 +286,14 @@ const javaVersionLabel = computed(() => {
 
 <template>
   <div class="settings-page">
-    <!-- 顶部导航 -->
     <div class="top-bar">
-      <button class="btn btn-outline" @click="emit('navigate', 'main')">
-        {{ t('settings.backToMain') }}
+      <button class="btn btn-outline" @click="goBack">
+        ← {{ t('settings.backToMain') }}
       </button>
       <h2 class="page-title">{{ t('settings.title') }}</h2>
     </div>
 
     <div class="settings-body">
-      <!-- 左侧分类导航 -->
       <div class="settings-nav">
         <div
           v-for="section in sections"
@@ -421,14 +302,12 @@ const javaVersionLabel = computed(() => {
           :class="{ active: activeSection === section.id }"
           @click="activeSection = section.id"
         >
-          <span class="nav-icon" v-html="section.icon"></span>
+          <span class="nav-icon">{{ section.icon }}</span>
           <span class="nav-label">{{ section.label }}</span>
         </div>
       </div>
 
-      <!-- 右侧内容区域 -->
       <div class="settings-content">
-        <!-- 常规设置 -->
         <div v-if="activeSection === 'general'" class="content-panel fade-in">
           <h3 class="panel-title">{{ t('settings.generalTitle') }}</h3>
 
@@ -438,17 +317,13 @@ const javaVersionLabel = computed(() => {
             <div class="form-group">
               <label>{{ t('settings.javaPath') }}</label>
               <div class="java-path-row">
-                <input
-                  v-model="javaPath"
-                  class="input"
-                  :placeholder="t('settings.javaPathPlaceholder')"
-                />
+                <input v-model="javaPath" class="input" :placeholder="t('settings.javaPathPlaceholder')" />
                 <button class="btn btn-outline btn-sm" @click="clearJavaPath" v-if="javaPath">{{ t('settings.clear') }}</button>
               </div>
-              <div class="form-hint" v-if="javaInfo" style="color: #00897B;">
+              <div class="form-hint form-hint-success" v-if="javaInfo">
                 {{ javaVersionLabel }}
               </div>
-              <div class="form-hint" v-else-if="javaPath" style="color: #e53935;">
+              <div class="form-hint form-hint-error" v-else-if="javaPath">
                 {{ t('settings.invalidJava') }}
               </div>
               <div class="form-hint" v-else>
@@ -487,23 +362,11 @@ const javaVersionLabel = computed(() => {
             <div class="form-row">
               <div class="form-group half">
                 <label>{{ t('settings.maxMemory') }}</label>
-                <input
-                  v-model.number="maxMemory"
-                  class="input"
-                  type="number"
-                  min="1"
-                  max="32"
-                />
+                <input v-model.number="maxMemory" class="input" type="number" :min="MIN_MEM" :max="MAX_MEM" />
               </div>
               <div class="form-group half">
                 <label>{{ t('settings.minMemory') }}</label>
-                <input
-                  v-model.number="minMemory"
-                  class="input"
-                  type="number"
-                  min="1"
-                  max="32"
-                />
+                <input v-model.number="minMemory" class="input" type="number" :min="MIN_MEM" :max="MAX_MEM" />
               </div>
             </div>
           </div>
@@ -514,23 +377,16 @@ const javaVersionLabel = computed(() => {
             <div class="form-group">
               <label>{{ t('settings.minecraftDir') }}</label>
               <div class="java-path-row">
-                <input
-                  v-model="minecraftDir"
-                  class="input"
-                  :placeholder="t('settings.minecraftDirPlaceholder')"
-                />
+                <input v-model="minecraftDir" class="input" :placeholder="t('settings.minecraftDirPlaceholder')" />
                 <button class="btn btn-outline btn-sm" @click="clearMinecraftDir" v-if="minecraftDir">{{ t('settings.clear') }}</button>
                 <button class="btn btn-outline btn-sm" @click="resetMinecraftDir">{{ t('settings.defaultBtn') }}</button>
               </div>
-              <div class="form-hint">
-                {{ t('settings.minecraftDirHint') }}
-              </div>
+              <div class="form-hint">{{ t('settings.minecraftDirHint') }}</div>
             </div>
 
             <div class="setting-row">
               <div class="setting-text">
                 <div class="setting-name">{{ t('settings.versionIsolation') }}</div>
-                <!-- <div class="setting-desc">开启之后不同用户数据不互通，包括存档</div>-->
               </div>
               <label class="toggle">
                 <input type="checkbox" v-model="versionIsolation" />
@@ -539,23 +395,31 @@ const javaVersionLabel = computed(() => {
             </div>
           </div>
 
-          <div v-if="saveMsg" class="save-msg" :class="{ error: saveMsg.includes(t('settings.saveFailed')) }">
+          <div v-if="saveMsg" class="save-msg" :class="{ error: saveError }">
             {{ saveMsg }}
           </div>
 
-          <button
-            class="btn btn-primary btn-large"
-            :disabled="saving"
-            @click="saveSettings"
-            style="margin-top: 16px;"
-          >
+          <button class="btn btn-primary btn-large" :disabled="saving" @click="saveSettings" style="margin-top: 16px;">
             {{ saving ? t('settings.saving') : t('settings.saveSettings') }}
           </button>
         </div>
 
-        <!-- 个性化 -->
         <div v-if="activeSection === 'personalize'" class="content-panel fade-in">
           <h3 class="panel-title">{{ t('settings.personalize') }}</h3>
+
+          <div class="setting-group">
+            <div class="group-header">{{ t('settings.appearance') || '外观模式' }}</div>
+            <div class="setting-row">
+              <div class="setting-text">
+                <div class="setting-name">{{ t('settings.darkMode') || '深色模式' }}</div>
+                <div class="setting-desc">{{ t('settings.darkModeDesc') || '切换浅色/深色主题' }}</div>
+              </div>
+              <label class="toggle">
+                <input type="checkbox" v-model="darkMode" @change="toggleDarkMode" />
+                <span class="toggle-slider"></span>
+              </label>
+            </div>
+          </div>
 
           <div class="setting-group">
             <div class="group-header">{{ t('settings.themeColor') }}</div>
@@ -578,7 +442,6 @@ const javaVersionLabel = computed(() => {
             <div class="bg-preview" v-if="backgroundImage">
               <div class="bg-preview-img" :style="{ backgroundImage: `url(${backgroundImage})` }"></div>
               <div class="bg-preview-info">
-                <!-- <span class="bg-preview-path">{{ backgroundImage }}</span>-->
                 <div class="bg-preview-actions">
                   <button class="btn btn-outline btn-sm" @click="selectBgImage">{{ t('settings.change') }}</button>
                   <button class="btn btn-outline btn-sm" @click="resetBgImage">{{ t('settings.resetDefault') }}</button>
@@ -590,23 +453,17 @@ const javaVersionLabel = computed(() => {
               <button class="btn btn-outline btn-sm" @click="selectBgImage">{{ t('settings.selectCustomBg') }}</button>
             </div>
             <div class="bing-daily-section">
-              <button
-                class="btn bing-daily-btn"
-                :disabled="bingLoading"
-                @click="fetchBingDailyImage"
-              >
-                <span v-if="!bingLoading">&#x1F30D; {{ t('settings.getBingDaily') }}</span>
+              <button class="btn bing-daily-btn" :disabled="bingLoading" @click="fetchBingDailyImage">
+                <span v-if="!bingLoading">🌍 {{ t('settings.getBingDaily') }}</span>
                 <span v-else class="spin-inline">{{ t('settings.getting') }}</span>
               </button>
             </div>
           </div>
         </div>
 
-        <!-- 其他 -->
         <div v-if="activeSection === 'other'" class="content-panel fade-in">
           <h3 class="panel-title">{{ t('settings.otherTitle') }}</h3>
 
-          <!-- 语言切换 -->
           <div class="setting-group">
             <div class="group-header">{{ t('settings.language') }}</div>
             <div class="setting-row">
@@ -622,7 +479,6 @@ const javaVersionLabel = computed(() => {
             </div>
           </div>
 
-          <!-- 导出启动命令按钮 -->
           <div class="setting-group">
             <div class="group-header">{{ t('settings.showExportLaunchCommand') }}</div>
             <div class="setting-row">
@@ -637,15 +493,12 @@ const javaVersionLabel = computed(() => {
             </div>
           </div>
 
-          <!-- 便携版模式 -->
           <div class="setting-group">
             <div class="group-header">{{ t('settings.portableMode') }}</div>
             <div class="setting-row">
               <div class="setting-text">
                 <div class="setting-name">{{ t('settings.enablePortable') }}</div>
-                <div class="setting-desc">
-                  {{ t('settings.portableDesc') }}
-                </div>
+                <div class="setting-desc">{{ t('settings.portableDesc') }}</div>
               </div>
               <label class="toggle">
                 <input type="checkbox" v-model="portableMode" @change="togglePortableMode" />
@@ -653,7 +506,6 @@ const javaVersionLabel = computed(() => {
               </label>
             </div>
 
-            <!-- 便携版 Java 状态 -->
             <div v-if="portableMode" class="portable-java-status">
               <div class="setting-row" style="flex-direction: column; align-items: flex-start;">
                 <div class="setting-name">{{ t('settings.portableJavaPath') }}</div>
@@ -670,13 +522,11 @@ const javaVersionLabel = computed(() => {
           </div>
         </div>
 
-        <!-- 用户 -->
         <div v-if="activeSection === 'user'" class="content-panel fade-in">
           <h3 class="panel-title">{{ t('settings.userTitle') }}</h3>
 
           <div class="current-user-card">
-            <img v-if="avatarMap[currentUser?.username]" class="user-avatar-lg" :src="avatarMap[currentUser?.username]" alt="" />
-            <div v-else class="user-avatar-lg">{{ currentUser?.username?.charAt(0).toUpperCase() || 'P' }}</div>
+            <div class="user-avatar-lg">{{ currentUser?.username?.charAt(0).toUpperCase() || 'P' }}</div>
             <div class="user-detail">
               <div class="user-name-lg">{{ currentUser?.username || 'Player' }}</div>
               <div class="user-type-badge" :class="currentUser?.type">
@@ -684,80 +534,6 @@ const javaVersionLabel = computed(() => {
               </div>
             </div>
             <button class="btn btn-outline" @click="handleLogout">{{ t('settings.switchAccount') }}</button>
-          </div>
-
-          <!-- 用户管理 -->
-          <div class="user-list-section">
-            <div class="group-header">{{ t('settings.userManage') }}</div>
-            <div class="user-manage-panel">
-              <div class="form-group">
-                <label>{{ t('settings.setPassword') }}</label>
-                <input
-                  v-if="currentUser?.hasPassword"
-                  v-model="pwdForm.oldPassword"
-                  type="password"
-                  class="input"
-                  :placeholder="t('settings.oldPassword')"
-                />
-                <input
-                  v-model="pwdForm.newPassword"
-                  type="password"
-                  class="input"
-                  :placeholder="t('settings.newPassword')"
-                />
-                <input
-                  v-model="pwdForm.confirmPassword"
-                  type="password"
-                  class="input"
-                  :placeholder="t('settings.confirmNewPassword')"
-                />
-                <div class="pwd-btn-row">
-                  <button
-                    v-if="currentUser?.hasPassword"
-                    class="btn btn-outline btn-sm"
-                    @click="clearUserPassword"
-                  >{{ t('settings.removePassword') }}</button>
-                  <button class="btn btn-primary btn-sm" :disabled="pwdSaving" @click="saveUserPassword">
-                    {{ pwdSaving ? t('settings.saving') : t('settings.savePwd') }}
-                  </button>
-                </div>
-              </div>
-              <div class="form-group user-delete-group">
-                <label>{{ t('settings.deleteAccount') }}</label>
-                <input
-                  v-if="currentUser?.hasPassword"
-                  v-model="deletePassword"
-                  type="password"
-                  class="input"
-                  :placeholder="t('settings.enterAccountPassword')"
-                />
-                <button class="btn btn-danger btn-sm" @click="confirmDeleteAccount">
-                  {{ t('settings.deleteAccountBtn') }}
-                </button>
-              </div>
-              <div v-if="userManageMsg" class="user-manage-msg">{{ userManageMsg }}</div>
-            </div>
-          </div>
-
-          <!-- 访客权限管理（解锁后显示） -->
-          <div v-if="currentUser?.type === 'guest' && !currentUser?.isLocked" class="user-list-section">
-            <div class="group-header guest-perm-header">
-              <span>{{ t('settings.guestPermTitle') }}</span>
-              <button class="btn btn-outline btn-sm" @click="lockGuestUser">
-                {{ t('settings.lockGuestBtn') }}
-              </button>
-            </div>
-            <div class="guest-perm-list">
-              <div v-for="item in guestPermItems" :key="item.key" class="guest-perm-row">
-                <div class="guest-perm-info">
-                  <span class="guest-perm-label">{{ item.label }}</span>
-                  <span class="guest-perm-desc">{{ item.desc }}</span>
-                </div>
-                <button class="perm-toggle" :class="{ on: item.value }" @click="toggleGuestPerm(item.key)">
-                  {{ item.value ? t('settings.permShow') : t('settings.permHide') }}
-                </button>
-              </div>
-            </div>
           </div>
 
           <div class="user-list-section">
@@ -769,8 +545,7 @@ const javaVersionLabel = computed(() => {
                 class="user-list-item"
                 :class="{ current: user.username === currentUser?.username }"
               >
-                <img v-if="avatarMap[user.username]" class="user-list-avatar" :src="avatarMap[user.username]" alt="" />
-                <div v-else class="user-list-avatar">{{ user.username.charAt(0).toUpperCase() }}</div>
+                <div class="user-list-avatar">{{ user.username.charAt(0).toUpperCase() }}</div>
                 <div class="user-list-info">
                   <div class="user-list-name">{{ user.username }}</div>
                   <div class="user-list-meta">
@@ -786,21 +561,20 @@ const javaVersionLabel = computed(() => {
           </div>
         </div>
 
-        <!-- 关于 -->
         <div v-if="activeSection === 'about'" class="content-panel fade-in">
           <h3 class="panel-title">{{ t('settings.aboutTitle') }}</h3>
 
           <div class="about-card">
-            <img :src="logoImg" class="about-logo-img" alt="QingLongLuncher" />
+            <img :src="logoImg" class="about-logo-img" alt="QinglongLuncher" />
             <div class="about-name">{{ t('settings.qinglongLuncher') }}</div>
             <div class="about-subtitle">{{ t('settings.qinglongLuncherCN') }}</div>
-            <div class="about-version">{{ launcherVersion }}</div>
+            <div class="about-version">{{ APP_VERSION }}</div>
           </div>
 
           <div class="about-info-list">
             <div class="about-info-item">
               <span class="info-label">{{ t('settings.version') }}</span>
-              <span class="info-value">{{ launcherVersion }}</span>
+              <span class="info-value">{{ APP_VERSION }}</span>
             </div>
             <div class="about-info-item">
               <span class="info-label">{{ t('settings.copyright') }}</span>
@@ -812,9 +586,8 @@ const javaVersionLabel = computed(() => {
             </div>
           </div>
 
-          <!-- 开源协议 -->
           <div class="license-section">
-            <button class="btn btn-outline license-btn" @click="$emit('show-license')">&#x1F4C4; {{ t('settings.openSourceLicense') }}</button>
+            <button class="btn btn-outline license-btn" @click="$emit('show-license')">📄 {{ t('settings.openSourceLicense') }}</button>
           </div>
         </div>
       </div>
@@ -823,7 +596,6 @@ const javaVersionLabel = computed(() => {
 </template>
 
 <style scoped>
-/* 样式部分保持不变 */
 .settings-page {
   width: 100%;
   height: 100%;
@@ -841,7 +613,7 @@ const javaVersionLabel = computed(() => {
   padding: 16px 24px;
   border-bottom: 1px solid var(--glass-border);
   flex-shrink: 0;
-  background: rgba(255, 255, 255, 0.88);
+  background: var(--glass-bg-heavy);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
 }
@@ -858,11 +630,10 @@ const javaVersionLabel = computed(() => {
   overflow: hidden;
 }
 
-/* 左侧导航 */
 .settings-nav {
   width: 220px;
   min-width: 200px;
-  background: rgba(255, 255, 255, 0.92);
+  background: var(--glass-bg-heavy);
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
   border-right: 1px solid var(--border);
@@ -905,7 +676,6 @@ const javaVersionLabel = computed(() => {
   white-space: nowrap;
 }
 
-/* 右侧内容 */
 .settings-content {
   flex: 1;
   overflow-y: auto;
@@ -914,10 +684,10 @@ const javaVersionLabel = computed(() => {
 
 .content-panel {
   max-width: 640px;
-  background: rgba(255, 255, 255, 0.85);
+  background: var(--glass-bg-heavy);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
-  border: 1px solid rgba(255, 255, 255, 0.4);
+  border: 1px solid var(--glass-border);
   border-radius: 12px;
   padding: 24px;
 }
@@ -929,15 +699,14 @@ const javaVersionLabel = computed(() => {
   margin-bottom: 24px;
 }
 
-/* 设置分组 */
 .setting-group {
-  background: rgba(255, 255, 255, 0.6);
+  background: var(--glass-bg);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   border-radius: 10px;
   padding: 16px;
   margin-bottom: 16px;
-  border: 1px solid rgba(255, 255, 255, 0.3);
+  border: 1px solid var(--glass-border);
 }
 
 .group-header {
@@ -949,7 +718,6 @@ const javaVersionLabel = computed(() => {
   margin-bottom: 16px;
 }
 
-/* 表单 */
 .form-group {
   margin-bottom: 16px;
 }
@@ -968,6 +736,9 @@ const javaVersionLabel = computed(() => {
   margin-top: 4px;
 }
 
+.form-hint-success { color: var(--success); }
+.form-hint-error { color: var(--danger); }
+
 .form-row {
   display: flex;
   gap: 16px;
@@ -977,7 +748,6 @@ const javaVersionLabel = computed(() => {
   flex: 1;
 }
 
-/* 设置行 */
 .setting-row {
   display: flex;
   align-items: center;
@@ -985,9 +755,7 @@ const javaVersionLabel = computed(() => {
   padding: 10px 0;
 }
 
-.setting-text {
-  flex: 1;
-}
+.setting-text { flex: 1; }
 
 .setting-name {
   font-size: 14px;
@@ -1001,12 +769,11 @@ const javaVersionLabel = computed(() => {
   color: var(--text-light);
 }
 
-/* 语言选择 */
 .language-select {
   padding: 6px 12px;
   border: 1px solid var(--border);
   border-radius: 8px;
-  background: white;
+  background: var(--bg-card);
   color: var(--text);
   font-size: 13px;
   font-weight: 500;
@@ -1016,34 +783,23 @@ const javaVersionLabel = computed(() => {
   min-width: 120px;
 }
 
-.language-select:hover {
-  border-color: var(--primary);
-}
+.language-select:hover { border-color: var(--primary); }
 
 .language-select:focus {
   border-color: var(--primary);
   box-shadow: 0 0 0 2px var(--primary-bg);
 }
 
-/* 用户卡片 */
 .current-user-card {
   display: flex;
   align-items: center;
   gap: 16px;
   padding: 20px;
-  background: rgba(255, 255, 255, 0.82);
+  background: var(--glass-bg-heavy);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   border-radius: 12px;
   margin-bottom: 24px;
-}
-
-/* 真实头像（img）：无背景容器，透明显不规则形状 */
-img.user-avatar-lg,
-img.user-list-avatar {
-  background: transparent;
-  box-shadow: none;
-  border: none;
 }
 
 .user-avatar-lg {
@@ -1051,9 +807,7 @@ img.user-list-avatar {
   height: 56px;
   background: var(--primary);
   color: white;
-  border-radius: 10px;
-  object-fit: cover;
-  flex-shrink: 0;
+  border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1062,9 +816,7 @@ img.user-list-avatar {
   flex-shrink: 0;
 }
 
-.user-detail {
-  flex: 1;
-}
+.user-detail { flex: 1; }
 
 .user-name-lg {
   font-size: 18px;
@@ -1081,121 +833,12 @@ img.user-list-avatar {
   font-weight: 500;
 }
 
-.user-type-badge.guest {
-  background: #FFF3E0;
-  color: #E65100;
-}
+.user-type-badge.guest { background: color-mix(in srgb, #E65100 15%, transparent); color: #E65100; }
+.user-type-badge.offline { background: color-mix(in srgb, #2E7D32 15%, transparent); color: #2E7D32; }
+.user-type-badge.premium { background: color-mix(in srgb, #283593 15%, transparent); color: #283593; }
+.user-type-badge.external { background: color-mix(in srgb, #00695C 15%, transparent); color: #00695C; }
 
-.user-type-badge.offline {
-  background: #E8F5E9;
-  color: #2E7D32;
-}
-
-.user-type-badge.premium {
-  background: #E8EAF6;
-  color: #283593;
-}
-
-.user-type-badge.external {
-  background: #E0F7FA;
-  color: #00695C;
-}
-
-/* 用户列表 */
-.user-list-section {
-  margin-top: 8px;
-}
-
-/* 用户管理面板 */
-.user-manage-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  padding: 16px 18px;
-  background: rgba(255, 255, 255, 0.82);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  border-radius: 12px;
-}
-.user-manage-panel .input {
-  margin-bottom: 8px;
-}
-.pwd-btn-row {
-  display: flex;
-  gap: 10px;
-}
-.btn-danger {
-  background: #e53935;
-  color: #fff;
-  border: none;
-}
-.btn-danger:hover {
-  background: #c62828;
-}
-.user-delete-group .btn-danger {
-  margin-top: 4px;
-}
-.user-manage-msg {
-  margin-top: 6px;
-  font-size: 12px;
-  color: var(--primary-color, #00bcd4);
-  word-break: break-all;
-}
-
-/* 访客权限管理 */
-.guest-perm-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.guest-perm-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.guest-perm-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 16px;
-  background: rgba(255, 255, 255, 0.82);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  border-radius: 10px;
-}
-.guest-perm-info {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-.guest-perm-label {
-  font-size: 14px;
-  font-weight: 600;
-  color: #333;
-}
-.guest-perm-desc {
-  font-size: 12px;
-  color: #888;
-}
-.perm-toggle {
-  flex-shrink: 0;
-  min-width: 76px;
-  padding: 6px 14px;
-  border-radius: 16px;
-  border: 1px solid #ddd;
-  background: #f2f2f2;
-  color: #999;
-  font-size: 12px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-.perm-toggle.on {
-  background: var(--primary-color, #00bcd4);
-  border-color: var(--primary-color, #00bcd4);
-  color: #fff;
-}
+.user-list-section { margin-top: 8px; }
 
 .user-list {
   display: flex;
@@ -1212,22 +855,15 @@ img.user-list-avatar {
   transition: background 0.15s;
 }
 
-.user-list-item:hover {
-  background: var(--bg-card);
-}
-
-.user-list-item.current {
-  background: var(--primary-bg);
-}
+.user-list-item:hover { background: var(--bg-card); }
+.user-list-item.current { background: var(--primary-bg); }
 
 .user-list-avatar {
   width: 40px;
   height: 40px;
   background: var(--primary-light);
   color: var(--primary-dark);
-  border-radius: 8px;
-  object-fit: cover;
-  flex-shrink: 0;
+  border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1236,9 +872,7 @@ img.user-list-avatar {
   flex-shrink: 0;
 }
 
-.user-list-info {
-  flex: 1;
-}
+.user-list-info { flex: 1; }
 
 .user-list-name {
   font-size: 14px;
@@ -1259,31 +893,16 @@ img.user-list-avatar {
   font-weight: 500;
 }
 
-.type-tag.guest {
-  background: #FFF3E0;
-  color: #E65100;
-}
-
-.type-tag.offline {
-  background: #E8F5E9;
-  color: #2E7D32;
-}
-
-.type-tag.premium {
-  background: #E8EAF6;
-  color: #283593;
-}
-
-.type-tag.external {
-  background: #E0F7FA;
-  color: #00695C;
-}
+.type-tag.guest { background: color-mix(in srgb, #E65100 15%, transparent); color: #E65100; }
+.type-tag.offline { background: color-mix(in srgb, #2E7D32 15%, transparent); color: #2E7D32; }
+.type-tag.premium { background: color-mix(in srgb, #283593 15%, transparent); color: #283593; }
+.type-tag.external { background: color-mix(in srgb, #00695C 15%, transparent); color: #00695C; }
 
 .pwd-tag {
   font-size: 11px;
   padding: 1px 8px;
   border-radius: 8px;
-  background: #E3F2FD;
+  background: color-mix(in srgb, #1565C0 15%, transparent);
   color: #1565C0;
   font-weight: 500;
 }
@@ -1297,11 +916,10 @@ img.user-list-avatar {
   font-weight: 600;
 }
 
-/* 关于页面 */
 .about-card {
   text-align: center;
   padding: 32px 20px;
-  background: rgba(255, 255, 255, 0.82);
+  background: var(--glass-bg-heavy);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   border-radius: 16px;
@@ -1334,7 +952,7 @@ img.user-list-avatar {
   display: inline-block;
   font-size: 13px;
   padding: 3px 12px;
-  background: white;
+  background: var(--bg-card);
   color: var(--primary-dark);
   border-radius: 12px;
   font-weight: 600;
@@ -1354,9 +972,7 @@ img.user-list-avatar {
   border-bottom: 1px solid var(--border);
 }
 
-.about-info-item:last-child {
-  border-bottom: none;
-}
+.about-info-item:last-child { border-bottom: none; }
 
 .info-label {
   font-size: 14px;
@@ -1369,37 +985,33 @@ img.user-list-avatar {
   font-weight: 500;
 }
 
-/* 保存消息 */
 .save-msg {
   padding: 8px 12px;
   border-radius: 8px;
   font-size: 13px;
-  background: rgba(232, 245, 233, 0.85);
+  background: color-mix(in srgb, var(--success) 15%, transparent);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
-  color: #2E7D32;
+  color: var(--success);
   margin-top: 12px;
-  border: 1px solid rgba(46, 125, 50, 0.15);
+  border: 1px solid color-mix(in srgb, var(--success) 30%, transparent);
 }
 
 .save-msg.error {
-  background: rgba(255, 243, 240, 0.85);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
   backdrop-filter: blur(10px);
   -webkit-backdrop-filter: blur(10px);
   color: var(--danger);
-  border-color: rgba(244, 67, 54, 0.15);
+  border-color: color-mix(in srgb, var(--danger) 30%, transparent);
 }
 
-/* Java 设置相关 */
 .java-path-row {
   display: flex;
   gap: 8px;
   align-items: center;
 }
 
-.java-path-row .input {
-  flex: 1;
-}
+.java-path-row .input { flex: 1; }
 
 .btn-sm {
   padding: 6px 12px;
@@ -1433,14 +1045,8 @@ img.user-list-avatar {
   transition: background 0.15s;
 }
 
-.java-item:last-child {
-  border-bottom: none;
-}
-
-.java-item:hover {
-  background: var(--primary-bg);
-}
-
+.java-item:last-child { border-bottom: none; }
+.java-item:hover { background: var(--primary-bg); }
 .java-item.selected {
   background: var(--primary-bg);
   border-left: 3px solid var(--primary);
@@ -1495,7 +1101,6 @@ img.user-list-avatar {
   border-radius: 8px;
 }
 
-/* 个性化 */
 .theme-colors {
   display: flex;
   gap: 16px;
@@ -1513,13 +1118,8 @@ img.user-list-avatar {
   transition: background 0.15s;
 }
 
-.theme-color-item:hover {
-  background: var(--glass-bg);
-}
-
-.theme-color-item.active {
-  background: var(--primary-bg);
-}
+.theme-color-item:hover { background: var(--glass-bg); }
+.theme-color-item.active { background: var(--primary-bg); }
 
 .theme-color-circle {
   width: 40px;
@@ -1561,14 +1161,6 @@ img.user-list-avatar {
 .bg-preview-info {
   flex: 1;
   min-width: 0;
-}
-
-.bg-preview-path {
-  display: block;
-  font-size: 12px;
-  color: var(--text-light);
-  word-break: break-all;
-  margin-bottom: 8px;
 }
 
 .bg-preview-actions {
@@ -1624,7 +1216,6 @@ img.user-list-avatar {
   animation: spin 1s linear infinite;
 }
 
-/* 开源协议 */
 .license-section {
   margin-top: 16px;
   padding-top: 16px;
@@ -1638,11 +1229,10 @@ img.user-list-avatar {
   font-weight: 500;
 }
 
-/* 便携版模式 */
 .portable-java-status {
   margin-top: 8px;
   padding: 12px 16px;
-  background: rgba(255, 255, 255, 0.6);
+  background: var(--glass-bg);
   border-radius: 8px;
   border: 1px solid var(--glass-border);
 }
@@ -1680,10 +1270,10 @@ img.user-list-avatar {
 .portable-java-missing {
   margin-top: 8px;
   padding: 8px 12px;
-  background: #FFF3E0;
+  background: color-mix(in srgb, #E65100 12%, transparent);
   color: #E65100;
   border-radius: 6px;
   font-size: 12px;
-  border: 1px solid #FFE0B2;
+  border: 1px solid color-mix(in srgb, #E65100 30%, transparent);
 }
 </style>

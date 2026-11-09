@@ -20,19 +20,17 @@ export function CheckFirstRun():Promise<boolean>;
 
 export function CheckLoaderInstalled(arg1:string,arg2:string):Promise<boolean>;
 
-export function CreateExternalUser(arg1:string,arg2:main.ExternalAuthData):Promise<string>;
+export function CreateExternalUser(arg1:string,arg2:main.ExternalAuthData):Promise<void>;
 
-export function CreateGuestUser(arg1:string,arg2:string):Promise<string>;
+export function CreateGuestUser(arg1:string,arg2:string):Promise<void>;
 
-export function CreateOfflineUser(arg1:string,arg2:string):Promise<string>;
+export function CreateOfflineUser(arg1:string,arg2:string):Promise<void>;
 
-export function CreatePremiumUser(arg1:string,arg2:main.MSAuthData):Promise<string>;
+export function CreatePremiumUser(arg1:string,arg2:main.MSAuthData):Promise<void>;
 
 export function CreateServer(arg1:string,arg2:string,arg3:number,arg4:number,arg5:number,arg6:boolean,arg7:string):Promise<void>;
 
-export function CreateUser(arg1:string,arg2:string):Promise<string>;
-
-export function DeleteCurrentUser(arg1:string):Promise<void>;
+export function CreateUser(arg1:string,arg2:string):Promise<void>;
 
 export function DeleteMod(arg1:string):Promise<void>;
 
@@ -41,12 +39,6 @@ export function DeleteServer(arg1:string):Promise<void>;
 export function DownloadAuthlibInjector():Promise<string>;
 
 export function DownloadVersion(arg1:string,arg2:string,arg3:string):Promise<void>;
-
-export function EnterHelperMode(arg1:string):Promise<void>;
-
-export function ExitHelperMode():Promise<void>;
-
-export function ExportLogTxt():Promise<string>;
 
 export function GenerateConnectionCode(arg1:string):Promise<Record<string, string>>;
 
@@ -78,13 +70,7 @@ export function GetFabricVersions(arg1:string):Promise<Array<main.LoaderInfo>>;
 
 export function GetForgeVersions(arg1:string):Promise<Array<main.LoaderInfo>>;
 
-export function GetFullLog():Promise<string>;
-
 export function GetGlobalConfig():Promise<main.GlobalConfig>;
-
-export function GetGuestPermissions():Promise<main.GuestPermissions>;
-
-export function GetHelperMode():Promise<main.HelperModeState>;
 
 export function GetInstalledVersions():Promise<Array<main.InstalledVersionInfo>>;
 
@@ -95,8 +81,6 @@ export function GetJavaInfo(arg1:string):Promise<main.JavaEntry>;
 export function GetJavaRequirement(arg1:string):Promise<main.JavaVersionReq>;
 
 export function GetLaunchCommand(arg1:string):Promise<string>;
-
-export function GetLauncherVersion():Promise<string>;
 
 export function GetMSAuthData(arg1:string):Promise<main.MSAuthData>;
 
@@ -118,13 +102,7 @@ export function GetModrinthCategories():Promise<Array<main.ModCategory>>;
 
 export function GetNeoForgeVersions(arg1:string):Promise<Array<main.LoaderInfo>>;
 
-export function GetOOBEDone():Promise<boolean>;
-
 export function GetOptiFineVersions(arg1:string):Promise<Array<main.LoaderInfo>>;
-
-export function GetPclCEMcDir():Promise<string>;
-
-export function GetPclMcDir(arg1:string):Promise<string>;
 
 export function GetPortableJavaInfo():Promise<main.JavaEntry>;
 
@@ -150,11 +128,7 @@ export function GetThemeColor():Promise<string>;
 
 export function GetTranslationCount():Promise<number>;
 
-export function GetUserAvatar(arg1:string):Promise<string>;
-
 export function GetUserConfig(arg1:string):Promise<main.UserConfig>;
-
-export function GetUserOOBEDone():Promise<boolean>;
 
 export function GetUserType(arg1:string):Promise<main.UserType>;
 
@@ -190,10 +164,6 @@ export function LoginUser(arg1:string,arg2:string):Promise<void>;
 
 export function LoginYggdrasil(arg1:string,arg2:string,arg3:string):Promise<main.ExternalAuthData>;
 
-export function MigrateFromPCLCE():Promise<main.MigrateUserResult>;
-
-export function MigrateMinecraftDir(arg1:string,arg2:string):Promise<string>;
-
 export function ParseConnectionCode(arg1:string):Promise<string>;
 
 export function ReadLicenseFile():Promise<string>;
@@ -218,8 +188,6 @@ export function ScanVersions():Promise<Array<main.InstalledVersionInfo>>;
 
 export function SearchJava():Promise<Array<main.JavaEntry>>;
 
-export function SearchMinecraftFolders():Promise<Array<main.HelperMinecraftInfo>>;
-
 export function SearchModpacks(arg1:string,arg2:string,arg3:number,arg4:number):Promise<main.ModSearchResponse>;
 
 export function SearchMods(arg1:string,arg2:string,arg3:string,arg4:string,arg5:number,arg6:number):Promise<main.ModSearchResponse>;
@@ -230,21 +198,13 @@ export function SelectBackgroundImage():Promise<string>;
 
 export function SelectJavaForVersion(arg1:string):Promise<main.JavaEntry>;
 
-export function SelectMinecraftDir():Promise<string>;
-
 export function SelectModSaveDir():Promise<string>;
-
-export function SelectPclExe():Promise<string>;
 
 export function SendServerCommand(arg1:string):Promise<void>;
 
 export function SetBackgroundImage(arg1:string):Promise<void>;
 
 export function SetCurrentUser(arg1:string):Promise<void>;
-
-export function SetGuestPermissions(arg1:main.GuestPermissions):Promise<void>;
-
-export function SetOOBEDone():Promise<void>;
 
 export function SetPortableMode(arg1:boolean):Promise<void>;
 
@@ -255,10 +215,6 @@ export function SetServerOnlineMode(arg1:string,arg2:boolean):Promise<void>;
 export function SetShowExportLaunchCommand(arg1:boolean):Promise<void>;
 
 export function SetThemeColor(arg1:string):Promise<void>;
-
-export function SetUserOOBEDone():Promise<void>;
-
-export function SetUserPassword(arg1:string,arg2:string):Promise<void>;
 
 export function SetVersionIsolation(arg1:boolean):Promise<void>;
 
@@ -277,7 +233,5 @@ export function TranslateModName(arg1:string):Promise<string>;
 export function UnlockGuest(arg1:string):Promise<void>;
 
 export function UserHasPassword(arg1:string):Promise<boolean>;
-
-export function ViewFullLog():Promise<void>;
 
 export function WaitForServerReady():Promise<void>;

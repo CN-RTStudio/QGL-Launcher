@@ -9,7 +9,7 @@ function goBack() { emit('back') }
 
 <template>
   <div class="license-page">
-    <p class="license-back"><button @click="goBack" class="back-btn">{{ t('license.back') }}</button></p>
+    <p class="license-back"><button @click="goBack" class="back-btn">&larr; {{ t('license.back') }}</button></p>
     <h2 class="license-title">{{ t('license.title') }}</h2>
     <hr class="license-divider">
 
@@ -41,7 +41,7 @@ function goBack() { emit('back') }
       "control" means (i) the power, direct or indirect, to cause the
       direction or management of such entity, whether by contract or
       otherwise, or (ii) ownership of fifty percent (50%) or more of the
-      outstanding shares, or (iii) beneficial ownership of such entity.
+      outstanding shares, or (iii) beneficial ownership.
 
       "You" (or "Your") shall mean an individual or Legal Entity
       exercising permissions granted by this License.
@@ -61,8 +61,8 @@ function goBack() { emit('back') }
       (an example is provided in the Appendix below).
 
       "Derivative Works" shall mean any work, whether in Source or Object
-      form, that is based on (or derived from) the Work and for which
-      the editorial revisions, annotations, elaborations, or other modifications
+      form, that is based on (or derived from) the Work and for which the
+      editorial revisions, annotations, elaborations, or other modifications
       represent, as a whole, an original work of authorship. For the purposes
       of this License, Derivative Works shall not include works that remain
       separable from, or merely link (or bind by name) to the interfaces of,
@@ -145,7 +145,7 @@ function goBack() { emit('back') }
 
       You may add Your own copyright statement to Your modifications and
       may provide additional or different license terms and conditions
-      for use, reproduction, or distribution of Your modifications, or
+      for use, reproduction, and distribution of Your modifications, or
       for any such Derivative Works as a whole, provided Your use,
       reproduction, and distribution of the Work otherwise complies with
       the conditions stated in this License.
@@ -160,8 +160,8 @@ function goBack() { emit('back') }
 
    6. Trademarks. This License does not grant permission to use the trade
       names, trademarks, service marks, or product names of the Licensor,
-      except as required for reasonable and customary use in describing
-      the origin of the Work and reproducing the content of the NOTICE file.
+      except as required for reasonable and customary use in describing the
+      origin of the Work and reproducing the content of the NOTICE file.
 
    7. Disclaimer of Warranty. Unless required by applicable law or
       agreed to in writing, Licensor provides the Work (and each
@@ -178,9 +178,9 @@ function goBack() { emit('back') }
       unless required by applicable law (such as deliberate and grossly
       negligent acts) or agreed to in writing, shall any Contributor be
       liable to You for damages, including any direct, indirect, special,
-      incidental, or consequential damages of any character arising as
-      a result of this License or out of the use or inability to use
-      the Work (including but not limited to damages for loss of goodwill,
+      incidental, or consequential damages of any character arising as a
+      result of this License or out of the use or inability to use the
+      Work (including but not limited to damages for loss of goodwill,
       work stoppage, computer failure or malfunction, or any and all
       other commercial damages or losses), even if such Contributor
       has been advised of the possibility of such damages.
@@ -194,7 +194,7 @@ function goBack() { emit('back') }
       of any other Contributor, and only if You agree to indemnify,
       defend, and hold each Contributor harmless for any liability
       incurred by, or claims asserted against, such Contributor by reason
-      of your accepting such warranty or additional liability.
+      of your accepting any such warranty or additional liability.
 
    END OF TERMS AND CONDITIONS
 
@@ -237,7 +237,7 @@ function goBack() { emit('back') }
   height: 100%;
   overflow-y: auto;
   padding: 20px;
-  background: #fff;
+  background: var(--glass-bg-heavy);
   position: relative;
   z-index: 2;
 }
@@ -246,7 +246,7 @@ function goBack() { emit('back') }
 .back-btn {
   border: none;
   background: none;
-  color: #00BCD4;
+  color: var(--primary);
   cursor: pointer;
   font-size: 14px;
 }
@@ -255,34 +255,36 @@ function goBack() { emit('back') }
 .license-title {
   margin: 0 0 16px 0;
   font-size: 18px;
+  color: var(--text);
 }
 
 .license-divider {
   border: none;
-  border-top: 1px solid #eee;
+  border-top: 1px solid var(--border);
   margin-bottom: 16px;
 }
 
 .license-subtitle {
   margin: 0 0 8px 0;
   font-size: 15px;
+  color: var(--text);
 }
 
 .license-meta {
   margin: 4px 0;
   font-size: 13px;
-  color: #666;
+  color: var(--text-secondary);
 }
 
 .license-link {
-  color: #00897B;
+  color: var(--primary-dark);
 }
 
 .license-text {
   font-family: Consolas, 'Courier New', monospace;
   font-size: 12px;
   line-height: 1.7;
-  color: #444;
+  color: var(--text-secondary);
   white-space: pre-wrap;
   word-break: break-all;
   margin: 0;

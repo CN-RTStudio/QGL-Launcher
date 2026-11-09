@@ -62,10 +62,6 @@ export function CreateUser(arg1, arg2) {
   return window['go']['main']['App']['CreateUser'](arg1, arg2);
 }
 
-export function DeleteCurrentUser(arg1) {
-  return window['go']['main']['App']['DeleteCurrentUser'](arg1);
-}
-
 export function DeleteMod(arg1) {
   return window['go']['main']['App']['DeleteMod'](arg1);
 }
@@ -80,18 +76,6 @@ export function DownloadAuthlibInjector() {
 
 export function DownloadVersion(arg1, arg2, arg3) {
   return window['go']['main']['App']['DownloadVersion'](arg1, arg2, arg3);
-}
-
-export function EnterHelperMode(arg1) {
-  return window['go']['main']['App']['EnterHelperMode'](arg1);
-}
-
-export function ExitHelperMode() {
-  return window['go']['main']['App']['ExitHelperMode']();
-}
-
-export function ExportLogTxt() {
-  return window['go']['main']['App']['ExportLogTxt']();
 }
 
 export function GenerateConnectionCode(arg1) {
@@ -154,20 +138,8 @@ export function GetForgeVersions(arg1) {
   return window['go']['main']['App']['GetForgeVersions'](arg1);
 }
 
-export function GetFullLog() {
-  return window['go']['main']['App']['GetFullLog']();
-}
-
 export function GetGlobalConfig() {
   return window['go']['main']['App']['GetGlobalConfig']();
-}
-
-export function GetGuestPermissions() {
-  return window['go']['main']['App']['GetGuestPermissions']();
-}
-
-export function GetHelperMode() {
-  return window['go']['main']['App']['GetHelperMode']();
 }
 
 export function GetInstalledVersions() {
@@ -188,10 +160,6 @@ export function GetJavaRequirement(arg1) {
 
 export function GetLaunchCommand(arg1) {
   return window['go']['main']['App']['GetLaunchCommand'](arg1);
-}
-
-export function GetLauncherVersion() {
-  return window['go']['main']['App']['GetLauncherVersion']();
 }
 
 export function GetMSAuthData(arg1) {
@@ -234,20 +202,8 @@ export function GetNeoForgeVersions(arg1) {
   return window['go']['main']['App']['GetNeoForgeVersions'](arg1);
 }
 
-export function GetOOBEDone() {
-  return window['go']['main']['App']['GetOOBEDone']();
-}
-
 export function GetOptiFineVersions(arg1) {
   return window['go']['main']['App']['GetOptiFineVersions'](arg1);
-}
-
-export function GetPclCEMcDir() {
-  return window['go']['main']['App']['GetPclCEMcDir']();
-}
-
-export function GetPclMcDir(arg1) {
-  return window['go']['main']['App']['GetPclMcDir'](arg1);
 }
 
 export function GetPortableJavaInfo() {
@@ -298,16 +254,8 @@ export function GetTranslationCount() {
   return window['go']['main']['App']['GetTranslationCount']();
 }
 
-export function GetUserAvatar(arg1) {
-  return window['go']['main']['App']['GetUserAvatar'](arg1);
-}
-
 export function GetUserConfig(arg1) {
   return window['go']['main']['App']['GetUserConfig'](arg1);
-}
-
-export function GetUserOOBEDone() {
-  return window['go']['main']['App']['GetUserOOBEDone']();
 }
 
 export function GetUserType(arg1) {
@@ -378,14 +326,6 @@ export function LoginYggdrasil(arg1, arg2, arg3) {
   return window['go']['main']['App']['LoginYggdrasil'](arg1, arg2, arg3);
 }
 
-export function MigrateFromPCLCE() {
-  return window['go']['main']['App']['MigrateFromPCLCE']();
-}
-
-export function MigrateMinecraftDir(arg1, arg2) {
-  return window['go']['main']['App']['MigrateMinecraftDir'](arg1, arg2);
-}
-
 export function ParseConnectionCode(arg1) {
   return window['go']['main']['App']['ParseConnectionCode'](arg1);
 }
@@ -434,10 +374,6 @@ export function SearchJava() {
   return window['go']['main']['App']['SearchJava']();
 }
 
-export function SearchMinecraftFolders() {
-  return window['go']['main']['App']['SearchMinecraftFolders']();
-}
-
 export function SearchModpacks(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['SearchModpacks'](arg1, arg2, arg3, arg4);
 }
@@ -458,16 +394,8 @@ export function SelectJavaForVersion(arg1) {
   return window['go']['main']['App']['SelectJavaForVersion'](arg1);
 }
 
-export function SelectMinecraftDir() {
-  return window['go']['main']['App']['SelectMinecraftDir']();
-}
-
 export function SelectModSaveDir() {
   return window['go']['main']['App']['SelectModSaveDir']();
-}
-
-export function SelectPclExe() {
-  return window['go']['main']['App']['SelectPclExe']();
 }
 
 export function SendServerCommand(arg1) {
@@ -480,14 +408,6 @@ export function SetBackgroundImage(arg1) {
 
 export function SetCurrentUser(arg1) {
   return window['go']['main']['App']['SetCurrentUser'](arg1);
-}
-
-export function SetGuestPermissions(arg1) {
-  return window['go']['main']['App']['SetGuestPermissions'](arg1);
-}
-
-export function SetOOBEDone() {
-  return window['go']['main']['App']['SetOOBEDone']();
 }
 
 export function SetPortableMode(arg1) {
@@ -508,14 +428,6 @@ export function SetShowExportLaunchCommand(arg1) {
 
 export function SetThemeColor(arg1) {
   return window['go']['main']['App']['SetThemeColor'](arg1);
-}
-
-export function SetUserOOBEDone() {
-  return window['go']['main']['App']['SetUserOOBEDone']();
-}
-
-export function SetUserPassword(arg1, arg2) {
-  return window['go']['main']['App']['SetUserPassword'](arg1, arg2);
 }
 
 export function SetVersionIsolation(arg1) {
@@ -552,10 +464,6 @@ export function UnlockGuest(arg1) {
 
 export function UserHasPassword(arg1) {
   return window['go']['main']['App']['UserHasPassword'](arg1);
-}
-
-export function ViewFullLog() {
-  return window['go']['main']['App']['ViewFullLog']();
 }
 
 export function WaitForServerReady() {

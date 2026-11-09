@@ -1,0 +1,68 @@
+package main
+
+import (
+	"encoding/json"
+	"path/filepath"
+	"strings"
+)
+
+func sbeOpNames(serverDir string) map[string]bool {
+	data, err := readBoundedFile(filepath.Join(serverDir, "ops.json"), sbeMaxFile)
+	if err != nil {
+		return map[string]bool{}
+	}
+	var ops []sbeBan
+	if err := json.Unmarshal(data, &ops); err != nil {
+		return map[string]bool{}
+	}
+	out := make(map[string]bool, len(ops))
+	for _, op := range ops {
+		if key := strings.ToLower(strings.TrimSpace(op.UUID)); key != "" {
+			out[key] = true
+		}
+	}
+	return out
+}
+
+func sbeCheckBans(serverDir, file string, list []sbeBan, ops map[string]bool, a *BanEnforcementAudit, ipMode bool) {
+	seen := make(map[string]int, len(list))
+	for _, ban := range list {
+		key := strings.ToLower(strings.TrimSpace(ban.UUID))
+		if ipMode {
+			key = strings.ToLower(strings.TrimSpace(ban.IP))
+			if key == "*" || strings.HasSuffix(key, ".*") {
+				a.add(file, sbeWildcard, "网段通配封禁: "+ban.IP, false)
+			}
+		} else if key == "" {
+			a.add(file, sbeNoUUID, "封禁条目缺少 UUID: "+ban.Name, false)
+		}
+		if strings.TrimSpace(ban.Reason) == "" || cfgIsPlaceholder(ban.Reason) {
+			a.add(file, sbeNoReason, "封禁无原因: "+ban.Name+ban.IP, false)
+		}
+		if key != "" {
+			seen[key]++
+			if seen[key] == 2 {
+				a.add(file, sbeDupEntry, "重复封禁: "+key, false)
+			}
+		}
+		if !ipMode && ops[key] {
+			a.add(file, sbeOpBanned, "管理员同时被封禁: "+ban.Name, true)
+		}
+	}
+}
+
+func AuditServerBanEnforcement(serverDir string) *BanEnforcementAudit {
+	a := &BanEnforcementAudit{ServerDir: serverDir}
+	if serverDir == "" {
+		a.add("banned-players.json", sbeBadJSON, "未配置服务器目录", false)
+		return a
+	}
+	ops := sbeOpNames(serverDir)
+	if list, ok := sbeLoad(serverDir, "banned-players.json", a); ok {
+		sbeCheckBans(serverDir, "banned-players.json", list, ops, a, false)
+	}
+	if list, ok := sbeLoad(serverDir, "banned-ips.json", a); ok {
+		sbeCheckBans(serverDir, "banned-ips.json", list, ops, a, true)
+	}
+	return a
+}

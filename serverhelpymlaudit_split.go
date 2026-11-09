@@ -1,0 +1,89 @@
+package main
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+func shyCountTopics(text string) int {
+	count := 0
+	inTopics := false
+	for _, line := range strings.Split(text, "\n") {
+		raw := strings.TrimRight(line, "\r")
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		indent := len(raw) - len(strings.TrimLeft(raw, " "))
+		if indent == 0 {
+			inTopics = strings.HasPrefix(trimmed, "general-topics:") || strings.HasPrefix(trimmed, "index-topics:")
+			continue
+		}
+		if !inTopics {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "- ") {
+			count++
+		}
+	}
+	return count
+}
+
+func AuditServerHelpYml(serverDir string) *HelpYmlAudit {
+	a := &HelpYmlAudit{ServerDir: serverDir}
+	const rel = "help.yml"
+	if serverDir == "" {
+		a.add(".", shyReasonMiss, "未配置服务器目录", false)
+		return a
+	}
+	if info, err := os.Lstat(serverDir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		a.add(".", shyReasonLink, "服务器目录为符号链接", true)
+		return a
+	}
+	path := filepath.Join(serverDir, rel)
+	if sym, serr := isSymlinkOrSpecial(path); serr == nil && sym {
+		a.add(rel, shyReasonLink, "帮助配置为符号链接或特殊文件", true)
+		return a
+	}
+	data, err := readBoundedFile(path, shyMaxFile)
+	if err != nil {
+		if _, serr := os.Lstat(path); serr != nil {
+			return a
+		}
+		if errors.Is(err, errLocalFileTooLarge) {
+			a.add(rel, shyReasonLarge, fmt.Sprintf("帮助配置超过 %d 字节", shyMaxFile), true)
+			return a
+		}
+		a.add(rel, shyReasonRead, "帮助配置不可读", false)
+		return a
+	}
+	text := string(data)
+	if strings.TrimSpace(text) == "" {
+		a.add(rel, shyReasonEmpty, "帮助配置为空", false)
+		return a
+	}
+	if tag := shyFindUnsafeTag(text); tag != "" {
+		a.add(rel, shyReasonTag, "含可被反序列化的 YAML 标签 "+tag, true)
+	}
+	if shyHasControlChars(text) {
+		a.add(rel, shyReasonCtl, "帮助配置含控制字符", true)
+	}
+	topics := shyCountTopics(text)
+	if topics > shyMaxTopics {
+		a.add(rel, shyReasonTopic, fmt.Sprintf("帮助条目 %d 超过 %d", topics, shyMaxTopics), false)
+	}
+	for _, line := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if len(trimmed) > shyMaxLine {
+			a.add(rel, shyReasonLong, "存在超长帮助文本行", false)
+			break
+		}
+	}
+	if strings.Contains(text, "&k") || strings.Contains(text, "\u00a7k") {
+		a.add(rel, shyReasonObfus, "帮助文本使用混淆格式码", false)
+	}
+	return a
+}

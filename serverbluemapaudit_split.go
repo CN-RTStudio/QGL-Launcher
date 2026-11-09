@@ -1,0 +1,93 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+func AuditServerBlueMap(serverDir string) *BlueMapAudit {
+	a := &BlueMapAudit{ServerDir: serverDir}
+	if serverDir == "" {
+		a.add(".", sbmReasonMissing, "未配置服务器目录", false)
+		return a
+	}
+	if info, err := os.Lstat(serverDir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		a.add(".", sbmReasonSymlink, "服务器目录为符号链接", true)
+		return a
+	}
+	if _, err := os.Stat(serverDir); err != nil {
+		a.add(".", sbmReasonMissing, "服务器目录不存在", false)
+		return a
+	}
+
+	serverPort := 25565
+	if text, ok := sbmLoadText(a, serverDir, "server.properties", sbmMaxProps); ok {
+		props := pxParseProperties(text)
+		if raw, found := props["server-port"]; found {
+			if value, parsed := cfgParseInt(strings.TrimSpace(raw)); parsed && value > 0 && value <= 65535 {
+				serverPort = value
+			}
+		}
+	}
+
+	webRel := "plugins/BlueMap/webserver.conf"
+	webText, webOK := sbmLoadText(a, serverDir, webRel, sbmMaxConfig)
+	if webOK {
+		props := sbmParseConf(webText)
+		if enabled, found := sbmBool(props, "enabled"); found && !enabled {
+			webOK = false
+		}
+		if webOK {
+			if raw, found := props["port"]; found {
+				trimmed := strings.TrimSpace(raw)
+				if port, parsed := cfgParseInt(trimmed); !parsed || port <= 0 || port > 65535 {
+					a.add(webRel, sbmReasonPort, "webserver 端口非法", true)
+				} else {
+					if port < sbmPrivilegedPort {
+						a.add(webRel, sbmReasonPrivPort, "监听特权端口需要额外权限", true)
+					}
+					if port == serverPort {
+						a.add(webRel, sbmReasonPortClash, "网页端口与游戏端口冲突", true)
+					}
+				}
+			}
+			if ip, found := props["ip"]; found {
+				trimmed := strings.TrimSpace(ip)
+				if trimmed == "" || trimmed == "0.0.0.0" || trimmed == "::" || trimmed == "[::]" {
+					a.add(webRel, sbmReasonBindAll, "绑定全部网卡，未限制来源", false)
+				}
+			}
+			if raw, found := props["max-connection-per-second"]; found {
+				if value, parsed := cfgParseInt(strings.TrimSpace(raw)); parsed && value <= 0 {
+					a.add(webRel, sbmReasonRate, "每秒连接上限被关闭，易被压垮", true)
+				}
+			}
+		}
+	}
+
+	coreRel := "plugins/BlueMap/core.conf"
+	coreText, coreOK := sbmLoadText(a, serverDir, coreRel, sbmMaxConfig)
+	if coreOK {
+		props := sbmParseConf(coreText)
+		if value, found := sbmBool(props, "accept-download"); found && value {
+			a.add(coreRel, sbmReasonDownload, "允许客户端批量下载地图数据", false)
+		}
+		if value, found := sbmBool(props, "metrics"); found && value {
+			a.add(coreRel, sbmReasonMetrics, "向外部端点上报统计数据", false)
+		}
+		if data, found := props["data"]; found {
+			trimmed := strings.TrimSpace(data)
+			if trimmed == "" {
+				a.add(coreRel, sbmReasonDataPath, "数据目录为空", true)
+			} else if filepath.IsAbs(trimmed) || strings.Contains(trimmed, "..") || strings.ContainsAny(trimmed, "\\") {
+				a.add(coreRel, sbmReasonDataPath, "数据目录含绝对路径或越界片段", true)
+			}
+		}
+	}
+
+	if !webOK && !coreOK {
+		a.add("plugins/BlueMap", sbmReasonMissing, "未找到 BlueMap 配置", false)
+	}
+	return a
+}

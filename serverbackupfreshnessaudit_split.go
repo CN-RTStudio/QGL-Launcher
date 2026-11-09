@@ -1,0 +1,94 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+)
+
+func bkIsArchive(name string) bool {
+	lower := strings.ToLower(name)
+	for _, ext := range bkExts {
+		if strings.HasSuffix(lower, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+func auditServerBackupsAt(serverDir string, now time.Time) BackupAudit {
+	audit := BackupAudit{Dir: serverDir, Now: now}
+	root := filepath.Join(serverDir, "backups")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		audit.add("backups", bkReasonMissing, "未发现 backups 目录", false)
+		audit.add("", bkReasonOK, "无备份归档", false)
+		return audit
+	}
+	seen := map[string]bool{}
+	for _, entry := range entries {
+		rel := filepath.Join("backups", entry.Name())
+		if !entry.IsDir() && !bkIsArchive(entry.Name()) {
+			continue
+		}
+		if !bkNameSane(entry.Name()) {
+			audit.add(rel, bkReasonBadName, "备份名含控制字符或路径片段", true)
+			continue
+		}
+		lower := strings.ToLower(entry.Name())
+		if seen[lower] {
+			audit.add(rel, bkReasonDuplicate, "备份名重复", false)
+			continue
+		}
+		seen[lower] = true
+		if len(audit.Backups) >= bkMaxEntries {
+			audit.add(rel, bkReasonTooMany, "备份数量超过预算", true)
+			break
+		}
+		info, err := os.Lstat(filepath.Join(root, entry.Name()))
+		if err != nil {
+			audit.add(rel, bkReasonUnreadable, "备份不可访问", true)
+			continue
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			audit.add(rel, bkReasonSymlink, "备份是符号链接", true)
+			continue
+		}
+		if info.IsDir() {
+			audit.Backups = append(audit.Backups, rel)
+			if info.ModTime().Before(now.Add(-bkStaleAfter)) {
+				audit.add(rel, bkReasonStaleBackup, "目录备份超过保留窗口未更新", false)
+			}
+			continue
+		}
+		if !info.Mode().IsRegular() {
+			audit.add(rel, bkReasonUnreadable, "备份不是普通文件", true)
+			continue
+		}
+		if info.Size() > bkMaxFileBytes {
+			audit.add(rel, bkReasonTooLarge, "备份超过体积预算", true)
+			continue
+		}
+		if info.Size() < bkMinBackupSize {
+			audit.add(rel, bkReasonEmptyBackup, "备份体积异常小", false)
+		}
+		if info.Mode().Perm()&0o022 != 0 {
+			audit.add(rel, bkReasonWorldWritable, "备份对其他用户可写", false)
+		}
+		if info.ModTime().Before(now.Add(-bkStaleAfter)) {
+			audit.add(rel, bkReasonStaleBackup, "备份超过保留窗口未更新", false)
+		}
+		audit.Backups = append(audit.Backups, rel)
+	}
+	sort.Slice(audit.Backups, func(i, j int) bool { return audit.Backups[i] > audit.Backups[j] })
+	if len(audit.Findings) == 0 {
+		audit.add("", bkReasonOK, "备份状态正常", false)
+	}
+	return audit
+}
+
+func AuditServerBackups(serverDir string) BackupAudit {
+	return auditServerBackupsAt(serverDir, time.Now())
+}

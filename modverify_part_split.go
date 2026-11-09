@@ -1,0 +1,100 @@
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+)
+
+func validateModDownloadURL(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fmt.Errorf("空的下载 URL")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("下载 URL 解析失败: %v", err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("不安全的下载 URL（非 HTTPS）: scheme=%q", u.Scheme)
+	}
+	if u.User != nil {
+		return fmt.Errorf("下载 URL 不允许携带用户信息(userinfo): %s", u.Host)
+	}
+	if port := u.Port(); port != "" && port != "443" {
+		return fmt.Errorf("下载 URL 只允许 443 端口，收到 %q", port)
+	}
+	if !modHostAllowed(u.Hostname()) {
+		return fmt.Errorf("下载主机 %q 不在 Mod 下载白名单内", strings.ToLower(u.Hostname()))
+	}
+	return nil
+}
+
+// modDownloadCheckRedirect 是 Mod 文件下载专用的重定向策略：
+// 每一跳都必须是 https、不能进内网/回环（复用全局 safeCheckRedirect 的判定）、
+// 主机还必须继续停留在 Mod 下载白名单内，且跳转次数受 maxRedirects 限制。
+func modDownloadCheckRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= maxRedirects {
+		return http.ErrUseLastResponse
+	}
+	next := req.URL
+	if !isHTTPSURL(next.String()) {
+		return errDenyInsecureRedirect
+	}
+	if isPrivateDest(next.String()) {
+		return errDenyPrivateRedirect
+	}
+	if !modHostAllowed(next.Hostname()) {
+		return fmt.Errorf("重定向到非白名单下载主机被拒绝: %s", strings.ToLower(next.Hostname()))
+	}
+	return nil
+}
+
+// newModDownloadClient 返回用于下载 Mod 文件的 HTTP 客户端。
+// 与 safeHTTPClient 的区别：
+//   - 不设 30 秒总超时：大体积整合包 Mod 走慢网超过 30 秒很正常，旧代码直接
+//     用 safeHTTPClient 下载文件会被整体掐断；体积上限由 MaxBytesReader 兜底，
+//     不需要靠总超时防炸磁盘；
+//   - 重定向每一跳都强制主机白名单（见 modDownloadCheckRedirect）。
+func newModDownloadClient() *http.Client {
+	c := safeHTTPClient()
+	c.Timeout = 0
+	c.CheckRedirect = modDownloadCheckRedirect
+	return c
+}
+
+// ===== 符号链接安全落盘 =====
+
+// isSymlink 报告路径当前是否为符号链接；路径不存在时返回 false。
+func isSymlink(p string) bool {
+	fi, err := os.Lstat(p)
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeSymlink != 0
+}
+
+// openSecurePartFile 创建/截断下载临时文件。写入前用 Lstat 确认它不是
+// 预置的符号链接，避免顺着链接写穿到 mods 目录之外的任意文件。
+func openSecurePartFile(partPath string) (*os.File, error) {
+	if isSymlink(partPath) {
+		return nil, fmt.Errorf("临时文件路径是符号链接，拒绝写入: %s", partPath)
+	}
+	return os.OpenFile(partPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+}
+
+// finalizeDownloadFile 在完整性校验通过后把临时文件原子改名为最终文件。
+// 最终路径若已被调包成符号链接同样拒绝落盘。
+func finalizeDownloadFile(partPath, destPath string) error {
+	if isSymlink(destPath) {
+		os.Remove(partPath)
+		return fmt.Errorf("目标路径是符号链接，拒绝落盘: %s", destPath)
+	}
+	if err := os.Rename(partPath, destPath); err != nil {
+		os.Remove(partPath)
+		return fmt.Errorf("重命名临时文件失败: %v", err)
+	}
+	return nil
+}

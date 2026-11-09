@@ -14,6 +14,26 @@ const emit = defineEmits(['navigate'])
 
 const { state: easyQGL, enterModFirstMode, exitMode } = useEasyQGL()
 
+function cleanError(e) {
+  return String(e).replace('Error: ', '')
+}
+
+function parseVersionNum(ver) {
+  return ver.split('.').map(n => parseInt(n, 10) || 0)
+}
+
+function compareVersionNum(a, b) {
+  const pa = parseVersionNum(a)
+  const pb = parseVersionNum(b)
+  const len = Math.max(pa.length, pb.length)
+  for (let i = 0; i < len; i++) {
+    const na = pa[i] || 0
+    const nb = pb[i] || 0
+    if (na !== nb) return na - nb
+  }
+  return 0
+}
+
 // 安装状态
 const installStep = ref(0) // 0=未开始, 1=安装游戏, 2=下载mod, 3=添加mod, 4=完成
 const installMsg = ref('')
@@ -51,6 +71,15 @@ function handleExitMode() {
   exitMode()
 }
 
+function getLoaderVersions(loaderName, gameVersion) {
+  switch (loaderName) {
+    case 'forge': return GetForgeVersions(gameVersion)
+    case 'fabric': return GetFabricVersions(gameVersion)
+    case 'neoforge': return GetNeoForgeVersions(gameVersion)
+    default: return Promise.resolve([])
+  }
+}
+
 async function handleInstall() {
   if (easyQGL.selectedMods.length === 0 || installStep.value > 0) return
   if (!easyQGL.lockedGameVersion || !easyQGL.lockedLoader) {
@@ -67,46 +96,17 @@ async function handleInstall() {
     installMsg.value = t('easyQGL.preparingInstall')
     addLog(t('easyQGL.startInstallGame'))
 
-    // 获取版本列表
     const versions = await GetVersionManifest()
     const targetVer = versions.find(v => v.id === easyQGL.lockedGameVersion)
     if (!targetVer) {
       throw new Error(t('easyQGL.versionNotFound', { version: easyQGL.lockedGameVersion }))
     }
 
-    // 查询加载器版本
     installMsg.value = t('easyQGL.queryingLoader')
     const loaderName = easyQGL.lockedLoader
-    let loaderVersions = []
-    switch (loaderName) {
-      case 'forge':
-        loaderVersions = await GetForgeVersions(easyQGL.lockedGameVersion)
-        break
-      case 'fabric':
-        loaderVersions = await GetFabricVersions(easyQGL.lockedGameVersion)
-        break
-      case 'neoforge':
-        loaderVersions = await GetNeoForgeVersions(easyQGL.lockedGameVersion)
-        break
-    }
+    const loaderVersions = await getLoaderVersions(loaderName, easyQGL.lockedGameVersion)
     if (!loaderVersions || loaderVersions.length === 0) {
       throw new Error(t('easyQGL.loaderNotFound', { loader: loaderName }))
-    }
-
-    // 按版本号数值比较，选择最高版本
-    function parseVersionNum(ver) {
-      return ver.split('.').map(n => parseInt(n, 10) || 0)
-    }
-    function compareVersionNum(a, b) {
-      const pa = parseVersionNum(a)
-      const pb = parseVersionNum(b)
-      const len = Math.max(pa.length, pb.length)
-      for (let i = 0; i < len; i++) {
-        const na = pa[i] || 0
-        const nb = pb[i] || 0
-        if (na !== nb) return na - nb
-      }
-      return 0
     }
 
     let loaderVer = loaderVersions[0]
@@ -180,44 +180,40 @@ async function handleInstall() {
     const modDir = await GetDefaultModDir(installedVersionName)
     addLog(t('easyQGL.modDirLog', { dir: modDir }))
 
-    const versionIDs = easyQGL.selectedMods
+    // 同时保留 mod 引用，避免 selectedMods 与 versionIDs 过滤后索引错位
+    const selectedPairs = easyQGL.selectedMods
       .filter(m => m.versionId)
-      .map(m => m.versionId)
+      .map(m => ({ versionId: m.versionId, mod: m }))
 
-    let allModVersionIDs = [...versionIDs]
-    let depCount = 0
+    let allMods = [...selectedPairs]
 
-    if (versionIDs.length > 0) {
+    if (selectedPairs.length > 0) {
       addLog(t('easyQGL.resolvingDeps'))
       try {
+        const versionIDs = selectedPairs.map(p => p.versionId)
         const deps = await ResolveModDependencies(versionIDs, easyQGL.lockedGameVersion, easyQGL.lockedLoader)
         if (deps && deps.length > 0) {
-          depCount = deps.length
-          addLog(t('easyQGL.foundDeps', { count: depCount }))
+          addLog(t('easyQGL.foundDeps', { count: deps.length }))
           for (const dep of deps) {
             addLog(`  - ${dep.projectName} (${dep.dependencyType})`)
-            allModVersionIDs.push(dep.versionId)
+            allMods.push({ versionId: dep.versionId, mod: null, dep })
           }
         } else {
           addLog(t('easyQGL.noExtraDeps'))
         }
       } catch (e) {
-        addLog(t('easyQGL.resolvingDepsFailed') + String(e).replace('Error: ', ''))
+        addLog(t('easyQGL.resolvingDepsFailed') + cleanError(e))
       }
     }
 
-    const totalMods = allModVersionIDs.length
+    const totalMods = allMods.length
     for (let i = 0; i < totalMods; i++) {
-      const vid = allModVersionIDs[i]
-      const isDep = i >= versionIDs.length
+      const { versionId, mod, dep } = allMods[i]
+      const isDep = !mod
       installMsg.value = t('easyQGL.addingMod', { current: i + 1, total: totalMods })
-      if (isDep) {
-        addLog(t('easyQGL.addingDepMod') + vid)
-      } else {
-        const mod = easyQGL.selectedMods[i]
-        addLog(t('easyQGL.addingModLog', { name: mod.title || mod.slug }))
-      }
-      await AddModToDownloadList(vid, modDir)
+      if (isDep) addLog(t('easyQGL.addingDepMod') + dep.projectName)
+      else addLog(t('easyQGL.addingModLog', { name: mod.title || mod.slug }))
+      await AddModToDownloadList(versionId, modDir)
     }
 
     installMsg.value = t('easyQGL.downloadingMods')
@@ -241,7 +237,7 @@ async function handleInstall() {
     addLog(t('easyQGL.allInstallDone'))
 
   } catch (e) {
-    installError.value = t('easyQGL.error') + String(e).replace('Error: ', '')
+    installError.value = t('easyQGL.error') + cleanError(e)
     addLog(t('easyQGL.error') + installError.value)
   }
 }
@@ -448,7 +444,7 @@ function handleReturnToNormal() {
 }
 
 .glass-container {
-  background: rgba(255, 255, 255, 0.82);
+  background: var(--glass-bg);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   border: 1px solid var(--border);
@@ -479,7 +475,9 @@ function handleReturnToNormal() {
   transition: all 0.2s; text-align: center; position: relative;
 }
 .choice-card:hover:not(.disabled-card) {
-  border-color: #FF9800; box-shadow: 0 6px 24px rgba(255, 152, 0, 0.15); transform: translateY(-2px);
+  border-color: var(--primary);
+  box-shadow: 0 6px 24px color-mix(in srgb, var(--primary) 15%, transparent);
+  transform: translateY(-2px);
 }
 .disabled-card { opacity: 0.5; cursor: not-allowed; }
 .choice-card-icon { font-size: 48px; margin-bottom: 16px; }
@@ -487,16 +485,18 @@ function handleReturnToNormal() {
 .choice-card-desc { font-size: 13px; color: var(--text-secondary); line-height: 1.5; }
 .coming-soon-badge {
   position: absolute; top: 12px; right: 12px; padding: 2px 10px;
-  background: #FF9800; color: white; border-radius: 10px; font-size: 11px; font-weight: 600;
+  background: var(--primary); color: white; border-radius: 10px; font-size: 11px; font-weight: 600;
 }
 
 .mode-section { max-width: 650px; margin: 0 auto; }
 
 .mode-header {
-  padding: 20px 24px; border-color: rgba(255, 152, 0, 0.25); margin-bottom: 16px;
+  padding: 20px 24px;
+  border-color: color-mix(in srgb, var(--primary) 25%, transparent);
+  margin-bottom: 16px;
 }
 .mode-badge {
-  display: inline-block; padding: 4px 12px; background: #FF9800; color: white;
+  display: inline-block; padding: 4px 12px; background: var(--primary); color: white;
   border-radius: 6px; font-size: 13px; font-weight: 600; margin-bottom: 12px;
 }
 .mode-info { display: flex; flex-direction: column; gap: 6px; }
@@ -505,7 +505,8 @@ function handleReturnToNormal() {
 
 /* 流程图 */
 .flow-chart {
-  padding: 24px; margin-bottom: 16px; border-color: rgba(255, 152, 0, 0.25);
+  padding: 24px; margin-bottom: 16px;
+  border-color: color-mix(in srgb, var(--primary) 25%, transparent);
 }
 
 .flow-steps {
@@ -523,33 +524,31 @@ function handleReturnToNormal() {
 }
 
 .flow-step.active .flow-dot {
-  background: #FF9800; color: white; box-shadow: 0 0 12px rgba(255, 152, 0, 0.4);
+  background: var(--primary); color: white;
+  box-shadow: 0 0 12px color-mix(in srgb, var(--primary) 40%, transparent);
 }
-.flow-step.done .flow-dot {
-  background: #4CAF50; color: white;
-}
-.flow-step.pending .flow-dot {
-  background: var(--border); color: var(--text-light);
-}
+.flow-step.done .flow-dot { background: var(--success); color: white; }
+.flow-step.pending .flow-dot { background: var(--border); color: var(--text-light); }
 
 .flow-label {
   font-size: 12px; color: var(--text-secondary); text-align: center; white-space: nowrap;
 }
-.flow-step.active .flow-label { color: #FF9800; font-weight: 600; }
-.flow-step.done .flow-label { color: #4CAF50; }
+.flow-step.active .flow-label { color: var(--primary); font-weight: 600; }
+.flow-step.done .flow-label { color: var(--success); }
 
 .flow-line {
   flex: 1; height: 3px; background: var(--border); margin-top: 17px; min-width: 32px;
   transition: background 0.3s;
 }
-.flow-line.done { background: #4CAF50; }
+.flow-line.done { background: var(--success); }
 
 .flow-message {
   font-size: 15px; color: var(--text); font-weight: 500; text-align: center; margin-bottom: 12px;
 }
 
 .flow-log {
-  background: rgba(0, 0, 0, 0.04); border-radius: 8px; padding: 12px; max-height: 150px;
+  background: var(--glass-bg-light);
+  border-radius: 8px; padding: 12px; max-height: 150px;
   overflow-y: auto; margin-bottom: 8px;
 }
 .log-line {
@@ -557,15 +556,15 @@ function handleReturnToNormal() {
 }
 
 .flow-error {
-  font-size: 13px; color: #f44336; text-align: center; margin-top: 8px;
+  font-size: 13px; color: var(--danger); text-align: center; margin-top: 8px;
 }
 
 .mode-actions {
   display: flex; gap: 12px; padding: 16px 20px; margin-bottom: 16px;
 }
 
-.install-btn { background: #FF9800; border-color: #FF9800; }
-.install-btn:hover:not(:disabled) { background: #F57C00; }
+.install-btn { background: var(--primary); border-color: var(--primary); }
+.install-btn:hover:not(:disabled) { background: var(--primary-dark); }
 .install-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .selected-mods { padding: 20px 24px; }
@@ -574,10 +573,12 @@ function handleReturnToNormal() {
 
 .mod-item {
   display: flex; align-items: center; gap: 12px; padding: 10px 14px;
-  background: rgba(255, 152, 0, 0.06); border: 1px solid rgba(255, 152, 0, 0.15); border-radius: 10px;
+  background: color-mix(in srgb, var(--primary) 6%, var(--glass-bg-light));
+  border: 1px solid color-mix(in srgb, var(--primary) 15%, transparent);
+  border-radius: 10px;
 }
 .mod-icon {
-  width: 36px; height: 36px; border-radius: 8px; background: #FF9800; color: white;
+  width: 36px; height: 36px; border-radius: 8px; background: var(--primary); color: white;
   display: flex; align-items: center; justify-content: center; font-size: 16px;
   font-weight: 700; flex-shrink: 0;
 }

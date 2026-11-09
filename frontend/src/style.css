@@ -26,6 +26,41 @@
   --glass-bg-light: rgba(255, 255, 255, 0.55);
   --glass-border: rgba(255, 255, 255, 0.3);
   --glass-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+
+  /* 通用 UI 颜色 */
+  --scrollbar: #CCCCCC;
+  --scrollbar-hover: #AAAAAA;
+  --tooltip-bg: #333333;
+  --toggle-off: #CCCCCC;
+  --overlay: rgba(0, 0, 0, 0.3);
+}
+
+/* 深色模式 */
+[data-mode="dark"] {
+  --primary: #4DD0E1;
+  --primary-dark: #26C6DA;
+  --primary-light: #006064;
+  --primary-bg: #00363D;
+  --bg: #121212;
+  --bg-card: #1E1E1E;
+  --text: #E0E0E0;
+  --text-secondary: #B0B0B0;
+  --text-light: #808080;
+  --border: #333333;
+
+  /* 深色半透明效果 */
+  --glass-bg: rgba(30, 30, 30, 0.75);
+  --glass-bg-heavy: rgba(30, 30, 30, 0.88);
+  --glass-bg-light: rgba(30, 30, 30, 0.55);
+  --glass-border: rgba(255, 255, 255, 0.1);
+  --glass-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+
+  /* 深色 UI 颜色 */
+  --scrollbar: #555555;
+  --scrollbar-hover: #777777;
+  --tooltip-bg: #1E1E1E;
+  --toggle-off: #555555;
+  --overlay: rgba(0, 0, 0, 0.6);
 }
 
 /* 主题色方案 */
@@ -78,12 +113,63 @@
   --primary-bg: #E8F5E9;
 }
 
+/* 深色模式 + 主题色组合 */
+[data-mode="dark"][data-theme="blue"] {
+  --primary: #64B5F6;
+  --primary-dark: #42A5F5;
+  --primary-light: #0D47A1;
+  --primary-bg: #0D2744;
+}
+
+[data-mode="dark"][data-theme="cyan"] {
+  --primary: #4DD0E1;
+  --primary-dark: #26C6DA;
+  --primary-light: #006064;
+  --primary-bg: #00363D;
+}
+
+[data-mode="dark"][data-theme="pink"] {
+  --primary: #F48FB1;
+  --primary-dark: #F06292;
+  --primary-light: #880E4F;
+  --primary-bg: #3D1A29;
+}
+
+[data-mode="dark"][data-theme="purple"] {
+  --primary: #CE93D8;
+  --primary-dark: #BA68C8;
+  --primary-light: #4A148C;
+  --primary-bg: #2A0E44;
+}
+
+[data-mode="dark"][data-theme="orange"] {
+  --primary: #FFB74D;
+  --primary-dark: #FFA726;
+  --primary-light: #E65100;
+  --primary-bg: #442A0D;
+}
+
+[data-mode="dark"][data-theme="yellow"] {
+  --primary: #FFF176;
+  --primary-dark: #FFEE58;
+  --primary-light: #F57F17;
+  --primary-bg: #443D0D;
+}
+
+[data-mode="dark"][data-theme="green"] {
+  --primary: #81C784;
+  --primary-dark: #66BB6A;
+  --primary-light: #1B5E20;
+  --primary-bg: #0D3D1A;
+}
+
 body {
   font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
   background-color: var(--bg);
   color: var(--text);
   overflow: hidden;
   user-select: none;
+  transition: background-color 0.3s, color 0.3s;
 }
 
 #app {
@@ -206,12 +292,12 @@ body {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #CCCCCC;
+  background: var(--scrollbar);
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #AAAAAA;
+  background: var(--scrollbar-hover);
 }
 
 /* Modal overlay */
@@ -221,7 +307,7 @@ body {
   left: 0;
   width: 100%;
   height: 100%;
-  background: rgba(0, 0, 0, 0.3);
+  background: var(--overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -236,7 +322,7 @@ body {
   max-width: 500px;
   max-height: 80vh;
   overflow-y: auto;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.15);
+  box-shadow: var(--glass-shadow);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--glass-border);
@@ -262,7 +348,7 @@ body {
   bottom: calc(100% + 8px);
   left: 50%;
   transform: translateX(-50%);
-  background: #333;
+  background: var(--tooltip-bg);
   color: white;
   padding: 6px 12px;
   border-radius: 4px;
@@ -298,7 +384,7 @@ body {
   left: 0;
   right: 0;
   bottom: 0;
-  background-color: #CCCCCC;
+  background-color: var(--toggle-off);
   border-radius: 12px;
   transition: 0.2s;
 }

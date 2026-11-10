@@ -1,0 +1,376 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+)
+
+// ===== Forge 版本获取 =====
+
+func (a *App) GetForgeVersions(mcVersion string) ([]LoaderInfo, error) {
+	if !isValidMCVersion(mcVersion) {
+		return nil, fmt.Errorf("无效的 Minecraft 版本格式")
+	}
+
+	apiURL := fmt.Sprintf("https://bmclapi2.bangbang93.com/forge/minecraft/%s", mcVersion)
+
+	client := safeHTTPClient()
+	resp, err := client.Get(apiURL)
+	if err != nil {
+		return nil, fmt.Errorf("获取 Forge 版本失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("获取 Forge 版本失败: HTTP %d", resp.StatusCode)
+	}
+
+	var entries []BMCLAPIForgeEntry
+	if err := readAPIJSON(resp, &entries); err != nil {
+		return nil, fmt.Errorf("解析 Forge 版本失败: %v", err)
+	}
+
+	recommendedVersion := ""
+	if promosResp, promosErr := safeHTTPClient().Get("https://bmclapi2.bangbang93.com/forge/promos"); promosErr == nil && promosResp.StatusCode == http.StatusOK {
+		var promos map[string]string
+		if promosErr2 := readAPIJSON(promosResp, &promos); promosErr2 == nil {
+			recommendedVersion = promos[mcVersion+"-recommended"]
+		}
+		promosResp.Body.Close()
+	}
+
+	loaders := []LoaderInfo{}
+	for _, entry := range entries {
+		var bestFile *struct {
+			Category string `json:"category"`
+			Format   string `json:"format"`
+			Hash     string `json:"hash"`
+			ID       int    `json:"id"`
+			Size     int64  `json:"size"`
+		}
+
+		for i := range entry.Files {
+			f := &entry.Files[i]
+			if f.Category == "installer" && f.Format == "jar" {
+				bestFile = f
+				break
+			}
+			if f.Category == "universal" && bestFile == nil {
+				bestFile = f
+			}
+		}
+
+		if bestFile == nil && len(entry.Files) > 0 {
+			bestFile = &entry.Files[0]
+		}
+
+		forgeVersion := mcVersion + "-" + entry.Version
+		if entry.Branch != "" {
+			forgeVersion += "-" + entry.Branch
+		}
+
+		category := "installer"
+		if bestFile != nil {
+			category = bestFile.Category
+		}
+
+		ext := "jar"
+		if category == "universal" || category == "client" {
+			ext = "zip"
+		}
+		downloadURL := fmt.Sprintf(
+			"https://bmclapi2.bangbang93.com/maven/net/minecraftforge/forge/%s/forge-%s-%s.%s",
+			forgeVersion, forgeVersion, category, ext,
+		)
+
+		isRecommended := entry.Version == recommendedVersion
+
+		loaders = append(loaders, LoaderInfo{
+			Name:         "forge",
+			DisplayName:  "Forge",
+			Version:      entry.Version,
+			MCVersion:    mcVersion,
+			DownloadURL:  downloadURL,
+			Stable:       isRecommended,
+			Category:     category,
+			ForgeVersion: forgeVersion,
+		})
+	}
+
+	return loaders, nil
+}
+
+// isValidMCVersion 验证 Minecraft 版本号格式
+// 防止版本号注入攻击，只允许数字、点、下划线和字母
+func isValidMCVersion(version string) bool {
+	if len(version) > 20 {
+		return false
+	}
+	for _, r := range version {
+		if !((r >= '0' && r <= '9') || r == '.' || r == '-' || r == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// ===== Fabric 版本获取 =====
+
+func (a *App) GetFabricVersions(mcVersion string) ([]LoaderInfo, error) {
+	if !isValidMCVersion(mcVersion) {
+		return nil, fmt.Errorf("无效的 Minecraft 版本格式")
+	}
+
+	client := safeHTTPClient()
+	fabricMetaURL := "https://bmclapi2.bangbang93.com/fabric-meta/v2/versions"
+
+	resp, err := client.Get(fabricMetaURL)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		resp, err = safeHTTPClient().Get("https://meta.fabricmc.net/v2/versions")
+		if err != nil {
+			return nil, fmt.Errorf("获取 Fabric 版本失败: %v", err)
+		}
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("获取 Fabric 版本失败: HTTP %d", resp.StatusCode)
+	}
+
+	var fabricMeta struct {
+		Game []struct {
+			Version string `json:"version"`
+			Stable  bool   `json:"stable"`
+		} `json:"game"`
+		Loader []FabricLoaderVersion `json:"loader"`
+	}
+	if err := readAPIJSON(resp, &fabricMeta); err != nil {
+		return nil, fmt.Errorf("解析 Fabric 版本失败: %v", err)
+	}
+
+	mcVersionNormalized := mcVersion
+	supported := false
+	for _, g := range fabricMeta.Game {
+		if g.Version == mcVersionNormalized {
+			supported = true
+			break
+		}
+	}
+	if !supported {
+		return []LoaderInfo{}, nil
+	}
+
+	loaders := []LoaderInfo{}
+	for _, lv := range fabricMeta.Loader {
+		loaders = append(loaders, LoaderInfo{
+			Name:        "fabric",
+			DisplayName: "Fabric",
+			Version:     lv.Version,
+			MCVersion:   mcVersion,
+			DownloadURL: "",
+			Stable:      lv.Stable,
+		})
+	}
+
+	return loaders, nil
+}
+
+func (a *App) GetNeoForgeVersions(mcVersion string) ([]LoaderInfo, error) {
+	if !isValidMCVersion(mcVersion) {
+		return nil, fmt.Errorf("无效的 Minecraft 版本格式")
+	}
+
+	major, minor, patch := parseMCVersion(mcVersion)
+	mcNum := major*1000 + minor*100 + patch
+	if mcNum < 1201 {
+		return []LoaderInfo{}, nil
+	}
+
+	var allVersions []string
+
+	legacyURL := "https://bmclapi2.bangbang93.com/neoforge/meta/api/maven/details/releases/net/neoforged/forge"
+	if entries, err := fetchNeoForgeVersionList(legacyURL); err == nil {
+		allVersions = append(allVersions, entries...)
+	}
+
+	latestURL := "https://bmclapi2.bangbang93.com/neoforge/meta/api/maven/details/releases/net/neoforged/neoforge"
+	if entries, err := fetchNeoForgeVersionList(latestURL); err == nil {
+		allVersions = append(allVersions, entries...)
+	}
+
+	if len(allVersions) == 0 {
+		legacyOfficialURL := "https://maven.neoforged.net/api/maven/versions/releases/net/neoforged/forge"
+		if entries, err := fetchNeoForgeVersionList(legacyOfficialURL); err == nil {
+			allVersions = append(allVersions, entries...)
+		}
+		latestOfficialURL := "https://maven.neoforged.net/api/maven/versions/releases/net/neoforged/neoforge"
+		if entries, err := fetchNeoForgeVersionList(latestOfficialURL); err == nil {
+			allVersions = append(allVersions, entries...)
+		}
+	}
+
+	loaders := []LoaderInfo{}
+	for _, apiName := range allVersions {
+		isLegacy := strings.Contains(apiName, "1.20.1")
+		inheritVersion := ""
+
+		if isLegacy {
+			inheritVersion = "1.20.1"
+		} else {
+			versionPart := apiName
+			if idx := strings.Index(apiName, "-"); idx > 0 {
+				versionPart = apiName[:idx]
+			}
+			parts := strings.Split(versionPart, ".")
+			if len(parts) >= 2 {
+				nfMajor := parts[0]
+				nfMinor := parts[1]
+				if nfMinor == "0" {
+					inheritVersion = "1." + nfMajor
+				} else {
+					inheritVersion = "1." + nfMajor + "." + nfMinor
+				}
+			}
+		}
+
+		if inheritVersion != mcVersion {
+			continue
+		}
+
+		isBeta := strings.Contains(apiName, "beta")
+
+		if apiName == "1.20.1-47.1.82" {
+			continue
+		}
+
+		pkgName := "neoforge"
+		if isLegacy {
+			pkgName = "forge"
+		}
+
+		downloadURL := fmt.Sprintf(
+			"https://bmclapi2.bangbang93.com/maven/net/neoforged/%s/%s/%s-%s-installer.jar",
+			pkgName, apiName, pkgName, apiName,
+		)
+
+		displayVersion := apiName
+		if isLegacy {
+			displayVersion = strings.TrimPrefix(apiName, "1.20.1-")
+		}
+
+		loaders = append(loaders, LoaderInfo{
+			Name:         "neoforge",
+			DisplayName:  "NeoForge",
+			Version:      displayVersion,
+			MCVersion:    mcVersion,
+			DownloadURL:  downloadURL,
+			Stable:       !isBeta,
+			ForgeVersion: apiName,
+		})
+	}
+
+	if len(loaders) > 10 {
+		loaders = loaders[len(loaders)-10:]
+	}
+
+	return loaders, nil
+}
+
+func fetchNeoForgeVersionList(apiURL string) ([]string, error) {
+	if !isHTTPSURL(apiURL) {
+		return nil, fmt.Errorf("不安全的 URL 协议")
+	}
+
+	client := safeHTTPClient()
+	resp, err := client.Get(apiURL)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	body, err := readLimited(resp.Body, apiJSONMaxBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	var data struct {
+		Versions []string `json:"versions"`
+	}
+	if err := json.Unmarshal(body, &data); err == nil && len(data.Versions) > 0 {
+		return data.Versions, nil
+	}
+
+	var mavenData struct {
+		Versions struct {
+			Version []string `json:"version"`
+		} `json:"versions"`
+	}
+	if err := json.Unmarshal(body, &mavenData); err == nil && len(mavenData.Versions.Version) > 0 {
+		return mavenData.Versions.Version, nil
+	}
+
+	return nil, fmt.Errorf("无法解析版本列表")
+}
+
+func (a *App) GetOptiFineVersions(mcVersion string) ([]LoaderInfo, error) {
+	if !isValidMCVersion(mcVersion) {
+		return nil, fmt.Errorf("无效的 Minecraft 版本格式")
+	}
+
+	client := safeHTTPClient()
+	apiURL := "https://bmclapi2.bangbang93.com/optifine/versionList"
+
+	resp, err := client.Get(apiURL)
+	if err != nil {
+		return nil, fmt.Errorf("获取 OptiFine 版本失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("获取 OptiFine 版本失败: HTTP %d", resp.StatusCode)
+	}
+
+	var allEntries []BMCLAPIOptiFineEntry
+	if err := readAPIJSON(resp, &allEntries); err != nil {
+		return nil, fmt.Errorf("解析 OptiFine 版本失败: %v", err)
+	}
+
+	loaders := []LoaderInfo{}
+	for _, entry := range allEntries {
+		if entry.MCVersion != mcVersion {
+			continue
+		}
+
+		versionName := entry.Type + "_" + entry.Patch
+
+		downloadURL := fmt.Sprintf(
+			"https://bmclapi2.bangbang93.com/optifine/%s/%s/%s",
+			entry.MCVersion, entry.Type, entry.Patch,
+		)
+
+		isPreview := strings.HasPrefix(entry.Filename, "preview_")
+
+		loaders = append(loaders, LoaderInfo{
+			Name:         "optifine",
+			DisplayName:  "OptiFine",
+			Version:      versionName,
+			MCVersion:    mcVersion,
+			DownloadURL:  downloadURL,
+			Stable:       !isPreview,
+			IsPreview:    isPreview,
+			Patch:        entry.Patch,
+			OptiFineType: entry.Type,
+		})
+	}
+
+	return loaders, nil
+}

@@ -1,0 +1,110 @@
+package main
+
+import (
+	"strings"
+)
+
+func parseHsErrCrash(lines []string) CrashDumpSummary {
+	s := CrashDumpSummary{Kind: "hs_err"}
+	noise := false
+	wantFrame := false
+	for _, line := range lines {
+		trim := strings.TrimSpace(line)
+
+		// 这些段之后是寄存器/内存映射/汇编等噪声，停止收集关键信息。
+		if strings.HasPrefix(trim, "siginfo:") || strings.HasPrefix(trim, "Registers:") ||
+			strings.HasPrefix(trim, "Stack:") || strings.HasPrefix(trim, "Instructions:") ||
+			strings.HasPrefix(trim, "Register to memory mapping") || strings.HasPrefix(trim, "Memory:") ||
+			strings.HasPrefix(trim, "vm_info:") || strings.HasPrefix(trim, "---") {
+			noise = true
+			wantFrame = false
+			continue
+		}
+		if noise {
+			continue
+		}
+
+		if strings.HasPrefix(trim, "Problematic frame:") {
+			wantFrame = true
+			continue
+		}
+		// Problematic frame 的下一条 # 帧（C/J/V/j）。
+		if wantFrame && strings.HasPrefix(trim, "#") {
+			if frame := hsFrame(trim); frame != "" {
+				s.Problematic = frame
+			}
+			wantFrame = false
+			continue
+		}
+
+		if strings.HasPrefix(trim, "#") {
+			body := strings.TrimSpace(strings.TrimPrefix(trim, "#"))
+			if strings.Contains(body, "Internal Error") && s.InternalError == "" {
+				s.InternalError = body
+				continue
+			}
+			if strings.Contains(body, "EXCEPTION_") && s.Exception == "" {
+				s.Exception = body
+				s.Heads = appendUnique(s.Heads, body, 6)
+				continue
+			}
+			if strings.Contains(body, "SIGSEGV") || strings.Contains(body, "SIGABRT") ||
+				strings.Contains(body, "SIGILL") || strings.Contains(body, "fatal error") {
+				s.Heads = appendUnique(s.Heads, body, 6)
+				continue
+			}
+			if frame := hsFrame(trim); frame != "" && len(s.Frames) < crashDumpMaxFrames {
+				s.Frames = append(s.Frames, frame)
+			}
+		}
+	}
+	return s
+}
+
+func renderCrashDumpSummary(s CrashDumpSummary) string {
+	var b strings.Builder
+	if s.FileName != "" {
+		b.WriteString("崩溃报告 ")
+		b.WriteString(s.FileName)
+		b.WriteString("：")
+	}
+	head := s.Description
+	if head == "" {
+		head = s.Exception
+	}
+	if head == "" {
+		head = s.InternalError
+	}
+	if head == "" && s.Problematic != "" {
+		head = "Problematic frame " + s.Problematic
+	}
+	if head == "" {
+		head = "检测到崩溃产物但未提取到关键信息"
+	}
+	b.WriteString(head)
+
+	if s.Exception != "" && s.Exception != s.Description {
+		b.WriteString(" | ")
+		b.WriteString(s.Exception)
+	}
+	if s.Problematic != "" && !strings.Contains(head, s.Problematic) {
+		b.WriteString(" | frame: ")
+		b.WriteString(s.Problematic)
+	}
+	for _, c := range s.CausedBy {
+		b.WriteString(" | Caused by: ")
+		b.WriteString(c)
+	}
+	if len(s.Frames) > 0 {
+		n := 3
+		if len(s.Frames) < n {
+			n = len(s.Frames)
+		}
+		b.WriteString(" | at ")
+		b.WriteString(strings.Join(s.Frames[:n], " <- "))
+	}
+	if s.Truncated {
+		b.WriteString(" (崩溃报告过长已截断)")
+	}
+	return b.String()
+}

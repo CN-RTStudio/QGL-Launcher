@@ -130,15 +130,3 @@ func (a *App) downloadForgeMappings(mcDir string, mcVersion string, installerPat
 }
 
 // ensureLauncherProfiles 确保 launcher_profiles.json 存在（Forge 安装器需要）
-func (a *App) ensureLauncherProfiles(mcDir string) {
-	profilesPath := filepath.Join(mcDir, "launcher_profiles.json")
-	if _, err := os.Stat(profilesPath); os.IsNotExist(err) {
-		profiles := map[string]interface{}{
-			"profiles": map[string]interface{}{},
-		}
-		data, _ := json.MarshalIndent(profiles, "", "  ")
-		os.WriteFile(profilesPath, data, 0644)
-	}
-}
-
-// getVersionFolderList 获取当前版本文件夹列表

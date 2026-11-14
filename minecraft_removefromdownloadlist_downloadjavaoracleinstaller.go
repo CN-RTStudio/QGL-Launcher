@@ -60,13 +60,3 @@ func (a *App) downloadJavaOracleInstaller(majorVer int, url string) error {
 }
 
 // runInstaller 运行安装程序
-func runInstaller(filePath string, isMSI bool) error {
-	if isMSI {
-		cmd := exec.Command("msiexec", "/i", filePath)
-		cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-		return cmd.Start()
-	}
-	cmd := exec.Command("cmd", "/c", "start", "", filePath)
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	return cmd.Start()
-}

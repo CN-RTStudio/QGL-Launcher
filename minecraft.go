@@ -276,6 +276,9 @@ func formatBytesForProgress(b int64) string {
 // 通过 HTTP Range 将文件分成 threads 段并行下载；服务器不支持 Range 时自动回退单线程
 // 进度通过 emitProgress 上报（文件名 + 已下载字节/总字节），total<=0 时步骤文本显示已下载量
 func (a *App) downloadFileMultiThread(url string, destPath string, threads int) error {
+	if err := validateDownloadURL(url); err != nil {
+		return err
+	}
 	if threads < 1 {
 		threads = 8
 	}
@@ -461,6 +464,9 @@ func (a *App) downloadFileMultiThread(url string, destPath string, threads int) 
 
 // downloadFileStream 单线程流式下载（多线程的回退路径），带进度
 func (a *App) downloadFileStream(url string, destPath string, name string, total int64) error {
+	if err := validateDownloadURL(url); err != nil {
+		return err
+	}
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return fmt.Errorf("创建请求失败 %s: %v", url, err)
@@ -513,6 +519,9 @@ func (a *App) downloadFileStream(url string, destPath string, name string, total
 
 // downloadFile 下载文件到指定路径
 func (a *App) downloadFile(url string, destPath string, reportProgress bool) error {
+	if err := validateDownloadURL(url); err != nil {
+		return err
+	}
 	dir := filepath.Dir(destPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("创建目录失败 %s: %v", dir, err)
@@ -1182,6 +1191,9 @@ func runInstaller(filePath string, isMSI bool) error {
 
 func (a *App) DownloadVersion(versionID string, versionURL string, customName string) error {
 	mcDir := a.getMinecraftDir()
+	if err := validateVersionName(customName); err != nil {
+		return fmt.Errorf("非法版本名: %v", err)
+	}
 	versionDir := filepath.Join(mcDir, "versions", customName)
 
 	// 1. 创建版本目录
@@ -1232,7 +1244,10 @@ func (a *App) DownloadVersion(versionID string, versionURL string, customName st
 			}
 			if lib.Downloads.Artifact != nil {
 				artifact := lib.Downloads.Artifact
-				libPath := filepath.Join(mcDir, "libraries", artifact.Path)
+				libPath, safeErr := safeRelPath(filepath.Join(mcDir, "libraries"), artifact.Path)
+				if safeErr != nil {
+					continue
+				}
 				if info, err := os.Stat(libPath); err == nil && info.Size() > 0 {
 					continue // 已存在，跳过
 				}
@@ -1324,6 +1339,9 @@ func (a *App) DownloadVersion(versionID string, versionURL string, customName st
 					tasks := make([]assetTask, 0)
 					for _, obj := range assetIndex.Objects {
 						hash := obj.Hash
+						if !isHexHash(hash) {
+							continue
+						}
 						subHash := hash[:2]
 						assetPath := filepath.Join(mcDir, "assets", "objects", subHash, hash)
 						if info, err := os.Stat(assetPath); err == nil && info.Size() > 0 {

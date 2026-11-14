@@ -676,7 +676,10 @@ func (a *App) downloadModItem(item *DownloadItem) error {
 		fileName += ".jar"
 	}
 
-	destPath := filepath.Join(destDir, fileName)
+	destPath, safeErr := safeRelPath(destDir, fileName)
+	if safeErr != nil {
+		return fmt.Errorf("非法 Mod 文件名: %s", fileName)
+	}
 
 	if _, err := os.Stat(destPath); err == nil {
 		return nil

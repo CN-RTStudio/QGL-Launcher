@@ -146,7 +146,13 @@ func (a *App) CreateServer(name, version string, port, maxMem, minMem int, onlin
 
 // downloadServerJar 下载服务器 JAR 文件（参考 PCL 逻辑）
 func (a *App) downloadServerJar(version string, targetDir string) error {
-	jarPath := filepath.Join(targetDir, version+"-server.jar")
+	if err := validateVersionName(version); err != nil {
+		return fmt.Errorf("非法服务端版本名: %v", err)
+	}
+	jarPath, safeErr := safeRelPath(targetDir, version+"-server.jar")
+	if safeErr != nil {
+		return fmt.Errorf("非法服务端目标路径: %v", safeErr)
+	}
 
 	// 如果已存在则跳过
 	if _, err := os.Stat(jarPath); err == nil {

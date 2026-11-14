@@ -1182,6 +1182,9 @@ func runInstaller(filePath string, isMSI bool) error {
 
 func (a *App) DownloadVersion(versionID string, versionURL string, customName string) error {
 	mcDir := a.getMinecraftDir()
+	if err := validateVersionName(customName); err != nil {
+		return fmt.Errorf("非法版本名: %v", err)
+	}
 	versionDir := filepath.Join(mcDir, "versions", customName)
 
 	// 1. 创建版本目录
@@ -1232,7 +1235,10 @@ func (a *App) DownloadVersion(versionID string, versionURL string, customName st
 			}
 			if lib.Downloads.Artifact != nil {
 				artifact := lib.Downloads.Artifact
-				libPath := filepath.Join(mcDir, "libraries", artifact.Path)
+				libPath, safeErr := safeRelPath(filepath.Join(mcDir, "libraries"), artifact.Path)
+				if safeErr != nil {
+					continue
+				}
 				if info, err := os.Stat(libPath); err == nil && info.Size() > 0 {
 					continue // 已存在，跳过
 				}
@@ -1324,6 +1330,9 @@ func (a *App) DownloadVersion(versionID string, versionURL string, customName st
 					tasks := make([]assetTask, 0)
 					for _, obj := range assetIndex.Objects {
 						hash := obj.Hash
+						if !isHexHash(hash) {
+							continue
+						}
 						subHash := hash[:2]
 						assetPath := filepath.Join(mcDir, "assets", "objects", subHash, hash)
 						if info, err := os.Stat(assetPath); err == nil && info.Size() > 0 {

@@ -709,6 +709,9 @@ func (a *App) installOldForge(installerPath string, mcDir string, mcVersion stri
 		targetVersion = mcVersion + "-forge-unknown"
 	}
 
+	if err := validateVersionName(targetVersion); err != nil {
+		return fmt.Errorf("安装器给出的版本名非法: %v", err)
+	}
 	versionFolder := filepath.Join(mcDir, "versions", targetVersion)
 
 	// 创建版本文件夹
@@ -772,19 +775,23 @@ func (a *App) installOldForge(installerPath string, mcDir string, mcVersion stri
 
 		// 提取 Jar 文件到 libraries
 		if pathStr != "" && filePath != "" {
-			libPath := filepath.Join(mcDir, "libraries", strings.ReplaceAll(pathStr, "/", string(os.PathSeparator)))
-			os.MkdirAll(filepath.Dir(libPath), 0755)
+			libPath, safeErr := safeRelPath(filepath.Join(mcDir, "libraries"), pathStr)
+			if safeErr != nil {
+				fmt.Printf("拒绝越界的安装清单路径: %s\n", pathStr)
+			} else {
+				os.MkdirAll(filepath.Dir(libPath), 0755)
 
-			for _, f := range r.File {
-				if f.Name == filePath {
-					rc, err := f.Open()
-					if err != nil {
+				for _, f := range r.File {
+					if f.Name == filePath {
+						rc, err := f.Open()
+						if err != nil {
+							break
+						}
+						data, _ := io.ReadAll(rc)
+						rc.Close()
+						os.WriteFile(libPath, data, 0644)
 						break
 					}
-					data, _ := io.ReadAll(rc)
-					rc.Close()
-					os.WriteFile(libPath, data, 0644)
-					break
 				}
 			}
 		}
@@ -831,7 +838,10 @@ func (a *App) extractMavenFiles(installerPath string, mcDir string) error {
 		// 只解压 maven/ 目录下的文件
 		if strings.HasPrefix(f.Name, "maven/") && !f.FileInfo().IsDir() {
 			relPath := strings.TrimPrefix(f.Name, "maven/")
-			destPath := filepath.Join(libsDir, relPath)
+			destPath, safeErr := safeRelPath(libsDir, relPath)
+			if safeErr != nil {
+				continue
+			}
 
 			os.MkdirAll(filepath.Dir(destPath), 0755)
 
@@ -1893,7 +1903,10 @@ func (a *App) downloadLoaderItem(item *DownloadItem) error {
 		}
 	}
 
-	destPath := filepath.Join(tempDir, fileName)
+	destPath, safeErr := safeRelPath(tempDir, fileName)
+	if safeErr != nil {
+		return fmt.Errorf("非法目标文件名: %s", fileName)
+	}
 
 	a.emitProgress("downloading", fileName, 0, 0)
 

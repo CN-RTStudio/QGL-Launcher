@@ -1,0 +1,75 @@
+﻿package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+
+)
+
+func (a *App) SetCurrentUser(id string) error {
+	config, err := a.GetGlobalConfig()
+	if err != nil {
+		config = &GlobalConfig{}
+	}
+	// CurrentUser 存储用户标识（随机文件夹名）
+	config.CurrentUser = id
+	return a.SaveGlobalConfig(config)
+}
+
+func (a *App) GetCurrentUser() (UserInfo, error) {
+	config, err := a.GetGlobalConfig()
+	if err != nil {
+		return UserInfo{}, fmt.Errorf("读取全局配置失败: %w", err)
+	}
+	if config.CurrentUser == "" {
+		return UserInfo{}, fmt.Errorf("未设置当前用户")
+	}
+	// CurrentUser 为用户标识（随机文件夹名），从注册表解析显示用户名
+	entry := a.findUserEntry(config.CurrentUser)
+	displayName := config.CurrentUser
+	if entry != nil {
+		displayName = entry.Name
+	}
+	hasPwd, err := a.UserHasPassword(config.CurrentUser)
+	if err != nil {
+		hasPwd = false
+	}
+	userType := a.GetUserType(config.CurrentUser)
+	isLocked := false
+	if userType == UserTypeGuest {
+		isLocked = !a.guestUnlocked
+	}
+	return UserInfo{
+		Username:    displayName,
+		Dir:         config.CurrentUser,
+		HasPassword: hasPwd,
+		Type:        userType,
+		IsLocked:    isLocked,
+	}, nil
+}
+
+func (a *App) UserHasPassword(id string) (bool, error) {
+	pwdPath := filepath.Join(a.userDirFor(id), "password.json")
+	info, err := os.Stat(pwdPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("检查密码文件失败: %w", err)
+	}
+	if info.Size() == 0 {
+		return false, nil
+	}
+	pwdBytes, err := os.ReadFile(pwdPath)
+	if err != nil {
+		return false, fmt.Errorf("读取密码文件失败: %w", err)
+	}
+	var pwdData PasswordData
+	if err := json.Unmarshal(pwdBytes, &pwdData); err != nil {
+		return false, nil
+	}
+	return pwdData.PasswordMD5 != "", nil
+}
+

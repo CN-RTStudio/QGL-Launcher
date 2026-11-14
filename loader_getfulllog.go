@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 func (a *App) GetFullLog() string {
@@ -22,21 +21,3 @@ func (a *App) GetFullLog() string {
 }
 
 // ExportLogTxt 弹出保存对话框，将完整日志导出为 txt，返回保存路径（取消返回空）
-func (a *App) ExportLogTxt() string {
-	path, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
-		Title:           "导出日志",
-		DefaultFilename: "QGL日志.txt",
-		Filters: []runtime.FileFilter{
-			{DisplayName: "文本文件 (*.txt)", Pattern: "*.txt"},
-		},
-	})
-	if err != nil || path == "" {
-		return ""
-	}
-	if err := os.WriteFile(path, []byte(a.GetFullLog()), 0644); err != nil {
-		return ""
-	}
-	return path
-}
-
-// ViewFullLog 用记事本打开完整日志

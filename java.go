@@ -808,7 +808,10 @@ func (a *App) downloadJavaRuntime(majorVer int) error {
 	var fileTasks []fileTask
 	totalFiles := 0
 	for relPath, entry := range manifest.Files {
-		destPath := filepath.Join(baseDir, filepath.FromSlash(relPath))
+		destPath, safeErr := safeRelPath(baseDir, relPath)
+		if safeErr != nil {
+			continue
+		}
 		if entry.Type == "directory" {
 			os.MkdirAll(destPath, 0755)
 			continue

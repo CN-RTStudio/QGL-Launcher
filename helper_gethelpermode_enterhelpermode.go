@@ -37,12 +37,3 @@ func (a *App) EnterHelperMode(dir string) error {
 }
 
 // ExitHelperMode 退出辅助模式
-func (a *App) ExitHelperMode() error {
-	config, err := a.GetGlobalConfig()
-	if err != nil {
-		return err
-	}
-	config.HelperMode = false
-	config.HelperModeDir = ""
-	return a.SaveGlobalConfig(config)
-}

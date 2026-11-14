@@ -1,0 +1,68 @@
+package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+func (a CrashReportAudit) Describe() string {
+	return describeTaggedFindings("崩溃报告未发现风险", a.Findings, crReasonOK, "crash-reports", crMaxFindings,
+		func(f CrashReportFinding) string { return f.Reason },
+		func(f CrashReportFinding) string { return f.File },
+		func(f CrashReportFinding) string { return f.Detail })
+}
+
+func (a *CrashReportAudit) add(file, reason, detail string, blocking bool) {
+	a.Findings = appendAuditFinding(a.Findings, crMaxFindings, CrashReportFinding{File: file, Reason: reason, Detail: detail, Blocking: blocking})
+}
+
+func crScanBody(audit *CrashReportAudit, rel, body string) {
+	lower := strings.ToLower(body)
+	for _, pattern := range crSecretPatterns {
+		idx := strings.Index(lower, pattern)
+		if idx < 0 {
+			continue
+		}
+		snippet := crRedactContext(lower[idx : idx+len(pattern)])
+		audit.add(rel, crReasonSecret, fmt.Sprintf("疑似明文凭据: %s", snippet), true)
+		break
+	}
+	for _, pattern := range crHomePatterns {
+		if strings.Contains(lower, pattern) {
+			audit.add(rel, crReasonHomePath, "报告包含用户主目录绝对路径", false)
+			break
+		}
+	}
+}
+
+var crSecretPatterns = []string{
+	"password=",
+	"password:",
+	"rcon.password",
+	"rcon-password",
+	"access_token",
+	"authorization: bearer",
+	"api_key",
+	"apikey",
+	"secret_key",
+	"private_key",
+	"-----begin",
+	"sessionid=",
+	"session_id=",
+	"jdbc:mysql://",
+	"mongodb://",
+	"postgres://",
+}
+var crHomePatterns = []string{
+	"/home/",
+	"/root/",
+	"c:\\users\\",
+	"/users/",
+}
+
+type CrashReportFinding = auditFinding
+type CrashReportAudit struct {
+	Dir      string
+	Files    []string
+	Findings []CrashReportFinding
+}

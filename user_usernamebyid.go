@@ -1,7 +1,6 @@
 ﻿package main
 
 import (
-	"os"
 	"path/filepath"
 
 )
@@ -58,38 +57,3 @@ type GlobalConfig struct {
 }
 
 // GetOOBEDone 是否已完成 OOBE 首次设置向导
-func (a *App) GetOOBEDone() (bool, error) {
-	config, err := a.GetGlobalConfig()
-	if err != nil {
-		return false, err
-	}
-	return config.OOBE, nil
-}
-
-// SetOOBEDone 标记 OOBE 已完成
-func (a *App) SetOOBEDone() error {
-	config, err := a.GetGlobalConfig()
-	if err != nil {
-		config = &GlobalConfig{}
-	}
-	config.OOBE = true
-	return a.SaveGlobalConfig(config)
-}
-
-func (a *App) GetAppDir() string {
-	exePath, err := os.Executable()
-	if err != nil {
-		return ""
-	}
-	return filepath.Dir(exePath)
-}
-
-func (a *App) GetQGLDir() string {
-	return filepath.Join(a.GetAppDir(), "QGL")
-}
-
-func (a *App) GetUsersDir() string {
-	return filepath.Join(a.GetQGLDir(), "Users")
-}
-
-// GetPortableJavaPath 获取便携版 Java 路径

@@ -18,10 +18,3 @@ func (a *App) SendServerCommand(cmd string) error {
 }
 
 // GetServerStatus 获取服务器状态
-func (a *App) GetServerStatus() ServerStatus {
-	serverMgr.mu.Lock()
-	defer serverMgr.mu.Unlock()
-	return serverMgr.status
-}
-
-// GetServerLogs 获取服务器日志

@@ -1,0 +1,104 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestProxyForwardLegacyBungee(t *testing.T) {
+	dir := t.TempDir()
+	auditWriteFileBody(t, dir, "spigot.yml", "settings:\n  bungeecord: true\n")
+	a := AuditServerProxyForwarding(dir)
+	if !a.Blocking() {
+		t.Fatalf("旧式 BungeeCord 转发应阻断: %s", a.Describe())
+	}
+	if !auditHasReason(a, pfwReasonLegacyBungee) {
+		t.Fatalf("应报告旧式转发: %s", a.Describe())
+	}
+}
+
+func TestProxyForwardConflictingModes(t *testing.T) {
+	dir := t.TempDir()
+	auditWriteFileBody(t, dir, "config/paper-global.yml", "proxies:\n  velocity:\n    enabled: true\n    secret: 0123456789abcdef0123456789abcdef\n  bungee-cord:\n    enabled: true\n")
+	a := AuditServerProxyForwarding(dir)
+	if !a.Blocking() {
+		t.Fatalf("双代理同时启用应阻断: %s", a.Describe())
+	}
+	if !auditHasReason(a, pfwReasonConflict) {
+		t.Fatalf("应报告代理模式冲突: %s", a.Describe())
+	}
+}
+
+func TestProxyForwardUncheckedForwarding(t *testing.T) {
+	dir := t.TempDir()
+	auditWriteFileBody(t, dir, "server.properties", "online-mode=true\nprevent-proxy-connections=false\nenforce-secure-profile=false\n")
+	a := AuditServerProxyForwarding(dir)
+	if a.Blocking() {
+		t.Fatalf("未校验转发不应阻断: %s", a.Describe())
+	}
+	count := 0
+	for _, f := range a.Findings {
+		if f.Reason == pfwReasonUncheckedForward {
+			count++
+		}
+	}
+	if count != 2 {
+		t.Fatalf("应报告两项转发未校验, 实际 %d: %s", count, a.Describe())
+	}
+}
+
+func TestProxyForwardBadBungeeValue(t *testing.T) {
+	dir := t.TempDir()
+	auditWriteFileBody(t, dir, "spigot.yml", "settings:\n  bungeecord: maybe\n")
+	a := AuditServerProxyForwarding(dir)
+	if a.Blocking() {
+		t.Fatalf("非法取值不应阻断: %s", a.Describe())
+	}
+	if !auditHasReason(a, pfwReasonBadValue) {
+		t.Fatalf("应报告非法取值: %s", a.Describe())
+	}
+}
+
+func TestProxyForwardSymlinkConfig(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.properties")
+	if err := os.WriteFile(target, []byte("online-mode=true\n"), 0o644); err != nil {
+		t.Fatalf("写入目标失败: %v", err)
+	}
+	link := filepath.Join(dir, "server.properties")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("无法创建符号链接: %v", err)
+	}
+	a := AuditServerProxyForwarding(dir)
+	if !a.Blocking() {
+		t.Fatalf("符号链接配置应阻断: %s", a.Describe())
+	}
+	if !auditHasReason(a, pfwReasonSymlink) {
+		t.Fatalf("应报告符号链接: %s", a.Describe())
+	}
+}
+
+func TestProxyForwardOversizedProperties(t *testing.T) {
+	dir := t.TempDir()
+	body := "online-mode=true\nmotd=" + strings.Repeat("a", pfwMaxProps+16) + "\n"
+	auditWriteFileBody(t, dir, "server.properties", body)
+	a := AuditServerProxyForwarding(dir)
+	if !a.Blocking() {
+		t.Fatalf("超大配置应阻断: %s", a.Describe())
+	}
+	if !auditHasReason(a, pfwReasonTooLarge) {
+		t.Fatalf("应报告体积超限: %s", a.Describe())
+	}
+}
+
+func TestProxyForwardCleanConfig(t *testing.T) {
+	dir := t.TempDir()
+	auditWriteFileBody(t, dir, "server.properties", "online-mode=true\nprevent-proxy-connections=true\nenforce-secure-profile=true\n")
+	auditWriteFileBody(t, dir, "config/paper-global.yml", "proxies:\n  velocity:\n    enabled: true\n    online-mode: true\n    secret: 0123456789abcdef0123456789abcdef\n")
+	a := AuditServerProxyForwarding(dir)
+	if a.Blocking() || a.HasWarnings() {
+		t.Fatalf("合规配置不应产生问题: %s", a.Describe())
+	}
+}

@@ -5,17 +5,28 @@ OpenQGL 是由 **热土工作室** 开发的开源 Minecraft 启动器，基于 
 - 开源协议：Apache License 2.0
 
 - 官方主线版本：https://ql.rtstu.com/qgl
+- 版本：OpenQGL 1-RC
 
 ---
 
 ## 目录
 
+- [环境要求](#环境要求)
 - [构建命令](#构建命令)
 - [上线前必须修改的内容](#上线前必须修改的内容)
   - [1. 加密逻辑（重要）](#1-加密逻辑重要)
   - [2. 正版账号 Client ID](#2-正版账号-client-id)
 - [开源协议说明](#开源协议说明)
 - [许可证](#许可证)
+
+---
+
+## 环境要求
+
+- Go 1.23+
+- Node.js 16+
+- Wails CLI v2.11.0+（安装：`go install github.com/wailsapp/wails/v2/cmd/wails@latest`）
+- Windows 系统
 
 ---
 
@@ -32,8 +43,6 @@ wails dev
 wails build
 ```
 
-> 各版本所需的 Go、Node.js、Wails CLI 版本请参考对应分支的 `go.mod` 与 `package.json`。
-
 ---
 
 ## 上线前必须修改的内容
@@ -44,8 +53,8 @@ wails build
 
 开源版中，微软账号认证数据（`ms_auth.json`）和外置账号认证数据使用 AES-GCM 加密存储。当前加密密钥的生成逻辑已简化：
 
-- 文件：`auth.go`
-- 函数：`getEncryptionKey`
+- 文件位置：`auth.go`
+- 函数：`getEncryptionKey(username string) []byte`（约第 64 行）
 - 当前逻辑：根据 `用户名 + "OQL"` 生成 32 字节 AES 密钥
 
 源码中已添加警告注释：
@@ -70,8 +79,8 @@ func getEncryptionKey(username string) []byte {
 
 开源版中已移除微软 OAuth 的 Client ID，正版登录功能不可用，需手动添加。
 
-- 文件：`auth.go`
-- 需要修改的常量：`oauthClientID`
+- 文件位置：`auth.go`（第 24 行）
+- 需要修改的常量：
 
 ```go
 const (
@@ -86,8 +95,8 @@ const (
 2. 注册一个新应用，账户类型选择「个人 Microsoft 账户」
 3. 添加重定向 URI（可选，设备代码流程不需要）
 4. 在「证书和密码」中获取 Application (client) ID
-5. 提交申请至 [Minecraft AppID Review](https://forms.office.com/Pages/ResponsePage.aspx?id=v4j5cvGGr0GRqy180BHbR-ajEQ1td1ROpz00KtS8Gd5UNVpPTkVLNFVROVQxNkdRMEtXVjNQQjdXVC4u)
-6. 将获取的 ID 填入 `auth.go` 的 `oauthClientID` 常量
+6. 提交申请至 [Minecraft AppID Review](https://forms.office.com/Pages/ResponsePage.aspx?id=v4j5cvGGr0GRqy180BHbR-ajEQ1td1ROpz00KtS8Gd5UNVpPTkVLNFVROVQxNkdRMEtXVjNQQjdXVC4u)
+5. 将获取的 ID 填入 `auth.go` 的 `oauthClientID` 常量
 
 > Client ID 属于公开标识符，不构成机密信息，但请遵守 [Microsoft 服务协议](https://www.microsoft.com/servicesagreement)。
 

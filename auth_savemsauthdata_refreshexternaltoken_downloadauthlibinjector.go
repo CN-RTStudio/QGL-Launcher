@@ -90,6 +90,3 @@ func (a *App) DownloadAuthlibInjector() (string, error) {
 }
 
 // GetAuthlibInjectorPath 获取 authlib-injector.jar 路径（不存在则下载）
-func (a *App) GetAuthlibInjectorPath() (string, error) {
-	return a.DownloadAuthlibInjector()
-}

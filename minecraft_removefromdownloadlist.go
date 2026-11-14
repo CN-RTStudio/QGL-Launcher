@@ -21,12 +21,3 @@ func (a *App) RemoveFromDownloadList(customName string) error {
 }
 
 // GetDownloadList 获取下载列表
-func (a *App) GetDownloadList() []DownloadItem {
-	a.downloadMutex.Lock()
-	defer a.downloadMutex.Unlock()
-	result := make([]DownloadItem, len(a.downloadList))
-	copy(result, a.downloadList)
-	return result
-}
-
-// GetDownloadListCount 获取下载列表数量

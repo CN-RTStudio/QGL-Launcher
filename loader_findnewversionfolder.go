@@ -14,9 +14,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-// ===== 日志功能 =====
 
-// writeLog 将信息写入日志文件（用户可随时查看和复制）
 
 func (a *App) findNewVersionFolder(mcDir string, oldVersions map[string]bool, mcVersion string, loaderType string) string {
 	versionsDir := filepath.Join(mcDir, "versions")

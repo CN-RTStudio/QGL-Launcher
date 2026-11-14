@@ -15,9 +15,7 @@ import (
 
 )
 
-// ===== 日志功能 =====
 
-// writeLog 将信息写入日志文件（用户可随时查看和复制）
 
 func isOldForge(versionStr string) bool {
 	// versionStr 类似 "1.16.5-34.1.0" 或 "34.1.0"

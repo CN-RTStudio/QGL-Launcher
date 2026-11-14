@@ -1,0 +1,319 @@
+package main
+
+import (
+	"archive/zip"
+	_ "embed"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"syscall"
+
+)
+
+func (a *App) extractMavenFiles(installerPath string, mcDir string) error {
+	r, err := zip.OpenReader(installerPath)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+
+	libsDir := filepath.Join(mcDir, "libraries")
+
+	for _, f := range r.File {
+		// 只解压 maven/ 目录下的文件
+		if strings.HasPrefix(f.Name, "maven/") && !f.FileInfo().IsDir() {
+			relPath := strings.TrimPrefix(f.Name, "maven/")
+			destPath := filepath.Join(libsDir, relPath)
+
+			os.MkdirAll(filepath.Dir(destPath), 0755)
+
+			rc, err := f.Open()
+			if err != nil {
+				continue
+			}
+			data, err := io.ReadAll(rc)
+			rc.Close()
+			if err != nil {
+				continue
+			}
+
+			os.WriteFile(destPath, data, 0644)
+		}
+	}
+
+	return nil
+}
+
+// downloadForgeLibraries 分析并下载 Forge 支持库文件
+func (a *App) downloadForgeLibraries(installerPath string, mcDir string, mcVersion string) error {
+	r, err := zip.OpenReader(installerPath)
+	if err != nil {
+		return fmt.Errorf("打开安装器失败: %v", err)
+	}
+	defer r.Close()
+
+	// 读取 install_profile.json 和 version.json
+	var profileData, versionData map[string]interface{}
+	for _, f := range r.File {
+		if f.Name == "install_profile.json" {
+			rc, _ := f.Open()
+			data, _ := io.ReadAll(rc)
+			rc.Close()
+			json.Unmarshal(data, &profileData)
+		}
+		if f.Name == "version.json" {
+			rc, _ := f.Open()
+			data, _ := io.ReadAll(rc)
+			rc.Close()
+			json.Unmarshal(data, &versionData)
+		}
+	}
+
+	if profileData == nil {
+		return fmt.Errorf("未找到 install_profile.json")
+	}
+
+	// 合并两个 JSON 的 libraries
+	var allLibs []interface{}
+	if libs, ok := profileData["libraries"].([]interface{}); ok {
+		allLibs = append(allLibs, libs...)
+	}
+	if versionData != nil {
+		if libs, ok := versionData["libraries"].([]interface{}); ok {
+			allLibs = append(allLibs, libs...)
+		}
+	}
+
+	// 下载每个支持库（先收集任务再带计数进度下载）
+	libsDir := filepath.Join(mcDir, "libraries")
+	type libDlTask struct {
+		url  string
+		path string
+		name string
+	}
+	var libTasks []libDlTask
+	for _, lib := range allLibs {
+		libMap, ok := lib.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// 获取下载信息
+		downloads, ok := libMap["downloads"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		artifact, ok := downloads["artifact"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		url, _ := artifact["url"].(string)
+		path, _ := artifact["path"].(string)
+		if url == "" || path == "" {
+			continue
+		}
+
+		// 替换为 BMCLAPI 镜像
+		url = strings.Replace(url, "https://maven.minecraftforge.net/", "https://bmclapi2.bangbang93.com/maven/", 1)
+		url = strings.Replace(url, "https://maven.neoforged.net/releases/", "https://bmclapi2.bangbang93.com/maven/", 1)
+		url = strings.Replace(url, "https://maven.fabricmc.net/", "https://bmclapi2.bangbang93.com/maven/", 1)
+
+		destPath := filepath.Join(libsDir, path)
+		if _, err := os.Stat(destPath); err == nil {
+			continue // 已存在
+		}
+
+		libTasks = append(libTasks, libDlTask{url: url, path: destPath, name: filepath.Base(path)})
+	}
+
+	for i, task := range libTasks {
+		a.emitProgress("downloading", fmt.Sprintf("支持库 %d/%d: %s", i+1, len(libTasks), task.name), int64(i+1), int64(len(libTasks)))
+		if err := a.downloadFile(task.url, task.path, false); err != nil {
+			fmt.Printf("下载支持库失败 %s: %v\n", task.name, err)
+		}
+	}
+
+	// === 新版 Forge 需要 Mappings 文件（参考 PCL 的 DlClientFix） ===
+	// install_profile.json 中的 data.MOJMAPS 字段引用了原版 MC 的 client_mappings
+	dataSection, hasData := profileData["data"].(map[string]interface{})
+	if !hasData {
+		fmt.Printf("未找到 data 字段（跳过 Mappings 下载）\n")
+	} else if _, hasMojmaps := dataSection["MOJMAPS"]; hasMojmaps {
+		fmt.Printf("检测到新版 Forge，需要下载 Mappings 文件\n")
+		a.downloadForgeMappings(mcDir, mcVersion, installerPath)
+	} else {
+		fmt.Printf("未找到 MOJMAPS 字段（跳过 Mappings 下载）\n")
+	}
+
+	return nil
+}
+
+// ensureForgeMappings 确保 Forge 新版需要的 Mappings 文件存在
+// 使用 CMD 命令（Invoke-WebRequest）下载文件
+func (a *App) ensureForgeMappings(installerPath string, mcDir string) {
+	a.writeLog("===== 开始检查 Forge Mappings 文件 =====")
+
+	// 1. 从 install_profile.json 获取配置
+	r, err := zip.OpenReader(installerPath)
+	if err != nil {
+		a.writeLog("无法打开安装器（跳过 Mappings 检查）: %v", err)
+		return
+	}
+	defer r.Close()
+
+	var installProfile map[string]interface{}
+	var mcVersion string
+	for _, f := range r.File {
+		if f.Name == "install_profile.json" {
+			rc, _ := f.Open()
+			data, _ := io.ReadAll(rc)
+			rc.Close()
+
+			json.Unmarshal(data, &installProfile)
+
+			// 获取 mcVersion - 新版 Forge 中 minecraft 是字符串格式 "1.19.2"
+			if minecraftVal, ok := installProfile["minecraft"]; ok {
+				if mv, ok := minecraftVal.(string); ok {
+					mcVersion = mv
+					a.writeLog("找到 mcVersion: %s", mcVersion)
+				}
+			}
+			break
+		}
+	}
+
+	if installProfile == nil || mcVersion == "" {
+		a.writeLog("未找到 mcVersion（跳过 Mappings 检查）")
+		return
+	}
+
+	// 2. 检查是否需要 MOJMAPS
+	dataSection, ok := installProfile["data"].(map[string]interface{})
+	if !ok {
+		a.writeLog("未找到 data 字段（跳过 Mappings 检查）")
+		return
+	}
+
+	mojmapsData, ok := dataSection["MOJMAPS"].(map[string]interface{})
+	if !ok {
+		a.writeLog("未找到 MOJMAPS 字段（跳过 Mappings 检查）")
+		return
+	}
+
+	clientValue, ok := mojmapsData["client"].(string)
+	if !ok || clientValue == "" {
+		a.writeLog("未找到 MOJMAPS.client 字段（跳过 Mappings 检查）")
+		return
+	}
+
+	// 解析 MOJMAPS.client: [net.minecraft:client:1.19.2-20220805.130853:mappings@txt]
+	clientValue = strings.Trim(clientValue, "[]")
+	atIndex := strings.Index(clientValue, "@")
+	if atIndex == -1 {
+		a.writeLog("MOJMAPS.client 格式错误（跳过 Mappings 检查）")
+		return
+	}
+
+	originalName := clientValue[:atIndex]
+	extension := clientValue[atIndex+1:]
+
+	parts := strings.Split(originalName, ":")
+	if len(parts) < 3 {
+		a.writeLog("MOJMAPS.client Maven 格式错误（跳过 Mappings 检查）")
+		return
+	}
+
+	groupPath := strings.Replace(parts[0], ".", "/", -1)
+	artifact := parts[1]
+	versionPart := parts[2]
+
+	targetPath := filepath.Join(mcDir, "libraries", groupPath, artifact, versionPart,
+		fmt.Sprintf("%s-%s-mappings.%s", artifact, versionPart, extension))
+
+	a.writeLog("目标路径: %s", targetPath)
+
+	// 检查是否已存在
+	if _, err := os.Stat(targetPath); err == nil {
+		a.writeLog("Mappings 文件已存在: %s", targetPath)
+		return
+	}
+
+	// 3. 从原版版本 JSON 获取 client_mappings URL
+	versionDir := filepath.Join(mcDir, "versions", mcVersion)
+	jsonPath := filepath.Join(versionDir, mcVersion+".json")
+
+	jsonData, err := os.ReadFile(jsonPath)
+	if err != nil {
+		a.writeLog("无法读取原版版本 JSON: %v", err)
+		return
+	}
+
+	var rawJSON map[string]interface{}
+	json.Unmarshal(jsonData, &rawJSON)
+
+	downloads, _ := rawJSON["downloads"].(map[string]interface{})
+	if downloads == nil {
+		a.writeLog("未找到 downloads 字段")
+		return
+	}
+
+	clientMappings, _ := downloads["client_mappings"].(map[string]interface{})
+	if clientMappings == nil {
+		a.writeLog("未找到 client_mappings 字段")
+		return
+	}
+
+	mappingsURL, _ := clientMappings["url"].(string)
+	if mappingsURL == "" {
+		a.writeLog("未找到 client_mappings URL")
+		return
+	}
+
+	// 替换为 BMCLAPI 镜像
+	mappingsURL = strings.Replace(mappingsURL, "https://piston-data.mojang.com/", "https://bmclapi2.bangbang93.com/", 1)
+	mappingsURL = strings.Replace(mappingsURL, "https://launcher.mojang.com/", "https://bmclapi2.bangbang93.com/", 1)
+
+	a.writeLog("使用 CMD 命令下载 Mappings 文件...")
+	a.writeLog("下载 URL: %s", mappingsURL)
+	a.writeLog("保存到: %s", targetPath)
+
+	// 4. 创建目标目录
+	os.MkdirAll(filepath.Dir(targetPath), 0755)
+
+	// 5. 使用 PowerShell Invoke-WebRequest 下载文件（带 User-Agent 避免被拦截）
+	a.writeLog("执行下载命令...")
+	downloadCmd := exec.Command("powershell", "-Command",
+		fmt.Sprintf("[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; $headers = @{'User-Agent'='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.7680.216 CosyBrowser/146.3.1'}; Invoke-WebRequest -Uri '%s' -OutFile '%s' -UseBasicParsing -Headers $headers",
+			mappingsURL, targetPath))
+	downloadCmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	output, err := downloadCmd.CombinedOutput()
+
+	if err != nil {
+		a.writeLog("CMD 下载失败: %v, 输出: %s", err, string(output))
+		return
+	}
+
+	// 6. 验证文件是否存在且不为空
+	fileInfo, statErr := os.Stat(targetPath)
+	if statErr != nil {
+		a.writeLog("下载后验证文件失败: %v", statErr)
+		return
+	}
+
+	if fileInfo.Size() == 0 {
+		a.writeLog("下载的文件为空！删除空文件")
+		os.Remove(targetPath)
+		return
+	}
+
+	a.writeLog("Mappings 下载成功! 文件大小: %d 字节, 路径: %s", fileInfo.Size(), targetPath)
+}
+
+// downloadForgeMappings 下载 Forge 新版所需的 client_mappings 文件（保留旧函数以保持兼容性）
+// Forge 安装器期望的路径格式: libraries/net/minecraft/client/{mcpVersion}/client-{mcpVersion}-mappings.txt

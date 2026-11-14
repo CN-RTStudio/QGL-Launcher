@@ -333,7 +333,10 @@ func (a *App) installModpack(item *DownloadItem) error {
 	totalFiles := len(manifest.Files)
 	for i, mf := range manifest.Files {
 		// 跳过非 mods 目录的文件（如 resourcepacks、shaderpacks 等也一并处理）
-		destPath := filepath.Join(versionDir, mf.Path)
+		destPath, pathOK := archiveEntryPathInside(versionDir, mf.Path)
+		if !pathOK {
+			continue
+		}
 		destDir := filepath.Dir(destPath)
 		if err := os.MkdirAll(destDir, 0755); err != nil {
 			continue
@@ -364,6 +367,11 @@ func (a *App) installModpack(item *DownloadItem) error {
 		}
 		if !downloaded {
 			fmt.Printf("下载整合包文件失败(跳过): %s\n", mf.Path)
+			continue
+		}
+		if err := verifyModrinthFile(destPath, mf.Hashes); err != nil {
+			os.Remove(destPath)
+			fmt.Printf("整合包文件校验失败(已删除): %s %v\n", mf.Path, err)
 		}
 	}
 

@@ -22,12 +22,12 @@ type ModpackSearchResponse = ModSearchResponse
 
 // ModrinthModpackManifest Modrinth 整合包 manifest.json
 type ModrinthModpackManifest struct {
-	FormatVersion int                          `json:"formatVersion"`
-	Game          string                       `json:"game"`
-	VersionID     string                       `json:"versionId"`
-	Name          string                        `json:"name"`
-	Files         []ModrinthModpackFile         `json:"files"`
-	Dependencies  map[string]string            `json:"dependencies"`
+	FormatVersion int                   `json:"formatVersion"`
+	Game          string                `json:"game"`
+	VersionID     string                `json:"versionId"`
+	Name          string                `json:"name"`
+	Files         []ModrinthModpackFile `json:"files"`
+	Dependencies  map[string]string     `json:"dependencies"`
 }
 
 // ModrinthModpackFile 整合包中的文件条目
@@ -384,7 +384,10 @@ func (a *App) installModpack(item *DownloadItem) error {
 			continue
 		}
 
-		destPath := filepath.Join(versionDir, relPath)
+		destPath, ok := archiveEntryPathInside(versionDir, relPath)
+		if !ok {
+			continue
+		}
 		if f.FileInfo().IsDir() {
 			os.MkdirAll(destPath, 0755)
 			continue

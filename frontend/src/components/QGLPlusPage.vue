@@ -4,7 +4,7 @@ import { useI18n } from 'vue-i18n'
 import {
   GetServerList, CreateServer, StartServer, StopServer, SendServerCommand,
   GetServerStatus, GetServerLogs, GenerateConnectionCode, ParseConnectionCode,
-  DeleteServer, SetServerOnlineMode, GetVersionManifest
+  DeleteServer, GetVersionManifest
 } from '../../wailsjs/go/main/App.js'
 import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime.js'
 import { showQGLDialog } from '../composables/qglDialog.js'
@@ -16,6 +16,10 @@ const props = defineProps({
 const emit = defineEmits(['navigate'])
 
 const { t } = useI18n()
+
+function cleanError(e) {
+  return String(e).replace(/^Error:\s*/, '')
+}
 
 // 错误捕获 - 防止生产模式下组件静默渲染为空
 const hasError = ref(false)
@@ -138,7 +142,6 @@ async function handleCreateServer() {
     createStep.value = ''
     creating.value = false
 
-    // 返回主页面并刷新列表
     pageState.value = 'main'
     await loadServers()
 
@@ -146,7 +149,7 @@ async function handleCreateServer() {
   } catch (e) {
     creating.value = false
     createStep.value = ''
-    showQGLDialog({ title: t('qglplus.error'), content: t('qglplus.createFailed') + ': ' + e, theme: 'error', btn1Label: t('qglplus.close') })
+    showQGLDialog({ title: t('qglplus.error'), content: t('qglplus.createFailed') + ': ' + cleanError(e), theme: 'error', btn1Label: t('qglplus.close') })
   }
 }
 
@@ -173,7 +176,7 @@ async function handleStartServer() {
     await StartServer(selectedServer.value)
     startStatusPolling()
   } catch (e) {
-    showQGLDialog({ title: t('qglplus.error'), content: String(e), theme: 'error', btn1Label: t('qglplus.close') })
+    showQGLDialog({ title: t('qglplus.error'), content: cleanError(e), theme: 'error', btn1Label: t('qglplus.close') })
   }
 }
 
@@ -182,7 +185,7 @@ async function handleStopServer() {
   try {
     await StopServer()
   } catch (e) {
-    showQGLDialog({ title: t('qglplus.error'), content: String(e), theme: 'error', btn1Label: t('qglplus.close') })
+    showQGLDialog({ title: t('qglplus.error'), content: cleanError(e), theme: 'error', btn1Label: t('qglplus.close') })
   }
 }
 
@@ -197,7 +200,7 @@ async function handleSendCommand() {
     await SendServerCommand(cmd)
     commandInput.value = ''
   } catch (e) {
-    showQGLDialog({ title: t('qglplus.error'), content: String(e), theme: 'error', btn1Label: t('qglplus.close') })
+    showQGLDialog({ title: t('qglplus.error'), content: cleanError(e), theme: 'error', btn1Label: t('qglplus.close') })
   }
 }
 
@@ -218,7 +221,7 @@ async function handleGenerateCode() {
     connectionCode.value = result.code || ''
     directAddress.value = result.directAddr || ''
   } catch (e) {
-    showQGLDialog({ title: t('qglplus.error'), content: String(e), theme: 'error', btn1Label: t('qglplus.close') })
+    showQGLDialog({ title: t('qglplus.error'), content: cleanError(e), theme: 'error', btn1Label: t('qglplus.close') })
   }
 }
 
@@ -243,7 +246,7 @@ async function handleParseCode() {
     parsedAddress.value = await ParseConnectionCode(joinCode.value.trim())
     await copyToClipboard(parsedAddress.value)
   } catch (e) {
-    showQGLDialog({ title: t('qglplus.error'), content: String(e), theme: 'error', btn1Label: t('qglplus.close') })
+    showQGLDialog({ title: t('qglplus.error'), content: cleanError(e), theme: 'error', btn1Label: t('qglplus.close') })
   }
 }
 
@@ -341,7 +344,7 @@ function goBack() {
   <div class="qglplus-page" :class="{ 'server-mode': isServerMode }">
     <!-- 错误状态 -->
     <div v-if="hasError" class="error-fallback">
-      <p>{{ t('qglplus.loadFailedRetry') }}</p>
+      <p>{{ t('qglplus.loadFailed') }}</p>
       <button class="btn btn-outline" @click="emit('navigate', 'main')">{{ t('qglplus.backToMain') }}</button>
     </div>
 
@@ -349,7 +352,7 @@ function goBack() {
     <!-- 顶部导航 -->
     <div class="page-header">
       <button class="btn btn-outline back-btn" @click="pageState === 'main' ? emit('navigate', 'main') : goBack()">
-        {{ pageState === 'main' ? t('qglplus.backToMain') : t('qglplus.back') }}
+        ← {{ pageState === 'main' ? t('qglplus.backToMain') : t('qglplus.back') }}
       </button>
       <h1 class="page-title">QGLPlus</h1>
       <span v-if="isServerMode" class="server-mode-badge">{{ t('qglplus.serverMode') }}</span>
@@ -571,7 +574,7 @@ function goBack() {
 }
 
 .qglplus-page.server-mode {
-  background: rgba(76, 175, 80, 0.05);
+  background: color-mix(in srgb, var(--success) 5%, transparent);
 }
 
 .error-fallback {
@@ -586,7 +589,7 @@ function goBack() {
 
 /* 毛玻璃容器 */
 .glass-container {
-  background: rgba(255, 255, 255, 0.82);
+  background: var(--glass-bg);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
   border: 1px solid var(--border);
@@ -612,7 +615,7 @@ function goBack() {
 }
 
 .server-mode-badge {
-  background: #4CAF50;
+  background: var(--success);
   color: white;
   padding: 4px 12px;
   border-radius: 12px;
@@ -657,25 +660,25 @@ function goBack() {
 
 .choice-card:hover {
   transform: translateY(-2px);
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 4px 16px var(--glass-shadow);
 }
 
 .create-card {
-  border-color: #4CAF50;
+  border-color: var(--success);
 }
 
 .create-card:hover {
-  border-color: #388E3C;
-  background: rgba(76, 175, 80, 0.06);
+  border-color: var(--success);
+  background: color-mix(in srgb, var(--success) 6%, var(--glass-bg));
 }
 
 .join-card {
-  border-color: #2196F3;
+  border-color: var(--primary);
 }
 
 .join-card:hover {
-  border-color: #1976D2;
-  background: rgba(33, 150, 243, 0.06);
+  border-color: var(--primary-dark);
+  background: color-mix(in srgb, var(--primary) 6%, var(--glass-bg));
 }
 
 .choice-icon {
@@ -831,7 +834,7 @@ function goBack() {
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0, 0, 0, 0.5);
+  background: var(--overlay);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -867,7 +870,7 @@ function goBack() {
 }
 
 .version-item:hover {
-  background: rgba(76, 175, 80, 0.1);
+  background: color-mix(in srgb, var(--success) 10%, var(--glass-bg-light));
 }
 
 /* 创建中遮罩 */
@@ -877,7 +880,7 @@ function goBack() {
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0, 0, 0, 0.6);
+  background: var(--overlay);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -888,8 +891,8 @@ function goBack() {
 .creating-spinner {
   width: 48px;
   height: 48px;
-  border: 4px solid rgba(76, 175, 80, 0.3);
-  border-top-color: #4CAF50;
+  border: 4px solid color-mix(in srgb, var(--success) 30%, transparent);
+  border-top-color: var(--success);
   border-radius: 50%;
   animation: spin 1s linear infinite;
   margin-bottom: 16px;
@@ -933,9 +936,9 @@ function goBack() {
 /* 连接码 */
 .connection-code-section {
   padding: 12px 16px;
-  border: 1px solid #4CAF50;
+  border: 1px solid var(--success);
   border-radius: 10px;
-  background: rgba(76, 175, 80, 0.06);
+  background: color-mix(in srgb, var(--success) 6%, var(--glass-bg-light));
 }
 
 .connection-code-section label {
@@ -955,7 +958,7 @@ function goBack() {
   flex: 1;
   font-size: 18px;
   font-weight: 700;
-  color: #4CAF50;
+  color: var(--success);
   letter-spacing: 2px;
 }
 
@@ -967,7 +970,7 @@ function goBack() {
 .log-container {
   height: 400px;
   overflow-y: auto;
-  background: #1a1a2e;
+  background: var(--log-bg, #1a1a2e);
   border-radius: 10px;
   padding: 12px;
   font-family: 'Consolas', 'Courier New', monospace;
@@ -976,7 +979,7 @@ function goBack() {
 }
 
 .log-line {
-  color: #e0e0e0;
+  color: var(--log-text, #e0e0e0);
   white-space: pre-wrap;
   word-break: break-all;
 }
@@ -1005,9 +1008,9 @@ function goBack() {
 }
 
 .quick-cmd-btn.active {
-  background: var(--primary, #00BCD4);
+  background: var(--primary);
   color: white;
-  border-color: var(--primary, #00BCD4);
+  border-color: var(--primary);
 }
 
 .quick-cmd-menu {
@@ -1015,12 +1018,12 @@ function goBack() {
   bottom: 100%;
   left: 0;
   margin-bottom: 4px;
-  background: rgba(255, 255, 255, 0.95);
+  background: var(--glass-bg-heavy);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--border);
   border-radius: 10px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--glass-shadow);
   z-index: 100;
   min-width: 120px;
   overflow: hidden;
@@ -1036,13 +1039,13 @@ function goBack() {
 }
 
 .quick-cmd-item:hover {
-  background: var(--primary-bg, rgba(0, 188, 212, 0.08));
+  background: var(--primary-bg);
 }
 
 .quick-cmd-item.active {
-  color: var(--primary, #00BCD4);
+  color: var(--primary);
   font-weight: 600;
-  background: var(--primary-bg, rgba(0, 188, 212, 0.08));
+  background: var(--primary-bg);
 }
 
 /* 直连地址 */
@@ -1062,16 +1065,16 @@ function goBack() {
 .direct-address-box code {
   font-family: 'Consolas', 'Courier New', monospace;
   font-size: 13px;
-  color: var(--primary, #00BCD4);
+  color: var(--primary);
 }
 
 /* 加入服务器 */
 .parsed-result {
   margin-top: 20px;
   padding: 16px;
-  border: 1px solid #2196F3;
+  border: 1px solid var(--primary);
   border-radius: 10px;
-  background: rgba(33, 150, 243, 0.06);
+  background: color-mix(in srgb, var(--primary) 6%, var(--glass-bg-light));
 }
 
 .parsed-result label {
@@ -1091,7 +1094,7 @@ function goBack() {
   flex: 1;
   font-size: 18px;
   font-weight: 700;
-  color: #2196F3;
+  color: var(--primary);
 }
 
 .join-hint {
@@ -1110,7 +1113,7 @@ function goBack() {
 }
 
 .btn-danger {
-  background: #f44336;
+  background: var(--danger);
   color: white;
   border: none;
   padding: 8px 20px;
@@ -1122,7 +1125,8 @@ function goBack() {
 }
 
 .btn-danger:hover:not(:disabled) {
-  background: #d32f2f;
+  background: var(--danger);
+  filter: brightness(0.9);
 }
 
 .btn-danger:disabled {

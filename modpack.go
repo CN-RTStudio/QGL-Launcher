@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -22,12 +23,12 @@ type ModpackSearchResponse = ModSearchResponse
 
 // ModrinthModpackManifest Modrinth 整合包 manifest.json
 type ModrinthModpackManifest struct {
-	FormatVersion int                          `json:"formatVersion"`
-	Game          string                       `json:"game"`
-	VersionID     string                       `json:"versionId"`
-	Name          string                        `json:"name"`
-	Files         []ModrinthModpackFile         `json:"files"`
-	Dependencies  map[string]string            `json:"dependencies"`
+	FormatVersion int                   `json:"formatVersion"`
+	Game          string                `json:"game"`
+	VersionID     string                `json:"versionId"`
+	Name          string                `json:"name"`
+	Files         []ModrinthModpackFile `json:"files"`
+	Dependencies  map[string]string     `json:"dependencies"`
 }
 
 // ModrinthModpackFile 整合包中的文件条目
@@ -194,13 +195,37 @@ func (a *App) AddModpackToDownloadList(versionID string, customName string) erro
 
 // installModpack 安装整合包（参考 PCL ModModpack 逻辑）
 // 流程：下载 .mrpack → 解析 manifest → 下载游戏 → 安装 loader → 下载所有 mod → 解压 overrides
+func resolveModpackTarget(root, rel string) (string, error) {
+	if rel == "" {
+		return "", fmt.Errorf("空路径被拒绝")
+	}
+	if strings.Contains(rel, "\\") {
+		return "", fmt.Errorf("路径含反斜杠被拒绝")
+	}
+	if path.IsAbs(rel) {
+		return "", fmt.Errorf("绝对路径被拒绝")
+	}
+	for _, seg := range strings.Split(rel, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return "", fmt.Errorf("路径含非法段被拒绝")
+		}
+	}
+	full := filepath.Join(root, filepath.FromSlash(rel))
+	cleanRoot := filepath.Clean(root)
+	cleanFull := filepath.Clean(full)
+	if cleanFull != cleanRoot && !strings.HasPrefix(cleanFull, cleanRoot+string(os.PathSeparator)) {
+		return "", fmt.Errorf("路径越界被拒绝")
+	}
+	return cleanFull, nil
+}
+
 func (a *App) installModpack(item *DownloadItem) error {
 	mcDir := a.GetMinecraftDir()
 
 	// 1. 下载整合包文件到临时目录
-	tmpDir := filepath.Join(os.TempDir(), "qgl-modpack")
-	if err := os.MkdirAll(tmpDir, 0755); err != nil {
-		return fmt.Errorf("创建临时目录失败: %v", err)
+	tmpDir, tmpErr := os.MkdirTemp("", "qgl-modpack-")
+	if tmpErr != nil {
+		return fmt.Errorf("创建临时目录失败: %v", tmpErr)
 	}
 	defer os.RemoveAll(tmpDir)
 
@@ -333,7 +358,11 @@ func (a *App) installModpack(item *DownloadItem) error {
 	totalFiles := len(manifest.Files)
 	for i, mf := range manifest.Files {
 		// 跳过非 mods 目录的文件（如 resourcepacks、shaderpacks 等也一并处理）
-		destPath := filepath.Join(versionDir, mf.Path)
+		destPath, safeErr := resolveModpackTarget(versionDir, mf.Path)
+		if safeErr != nil {
+			fmt.Printf("整合包文件路径被拒绝(%v): %s\n", safeErr, mf.Path)
+			continue
+		}
 		destDir := filepath.Dir(destPath)
 		if err := os.MkdirAll(destDir, 0755); err != nil {
 			continue
@@ -384,7 +413,11 @@ func (a *App) installModpack(item *DownloadItem) error {
 			continue
 		}
 
-		destPath := filepath.Join(versionDir, relPath)
+		destPath, safeErr := resolveModpackTarget(versionDir, relPath)
+		if safeErr != nil {
+			fmt.Printf("覆写文件路径被拒绝(%v): %s\n", safeErr, relPath)
+			continue
+		}
 		if f.FileInfo().IsDir() {
 			os.MkdirAll(destPath, 0755)
 			continue

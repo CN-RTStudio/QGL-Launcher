@@ -20,11 +20,3 @@ func listVersionFolders(versionsDir string) []string {
 }
 
 // containsStr 检查字符串是否在切片中
-func containsStr(slice []string, s string) bool {
-	for _, v := range slice {
-		if v == s {
-			return true
-		}
-	}
-	return false
-}

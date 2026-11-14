@@ -25,11 +25,3 @@ func (a *App) selectJavaForInstaller() (*JavaEntry, error) {
 }
 
 // GetRecommendedJavaForVersion 获取推荐安装的 Java 版本号（供前端提示用）
-func (a *App) GetRecommendedJavaForVersion(versionID string) int {
-	req := a.GetJavaRequirement(versionID)
-	if req.MinMajor > 0 {
-		return req.MinMajor
-	}
-	// 对于非常老的版本（MinMajor=0），推荐 Java 8（最兼容的版本）
-	return 8
-}

@@ -32,12 +32,12 @@ type ServerConfig struct {
 
 // ServerStatus 服务器运行状态
 type ServerStatus struct {
-	Running   bool   `json:"running"`
-	Name      string `json:"name"`
-	Version   string `json:"version"`
-	Port      int    `json:"port"`
-	PID       int    `json:"pid"`
-	Ready     bool   `json:"ready"` // 是否启动完毕
+	Running bool   `json:"running"`
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Port    int    `json:"port"`
+	PID     int    `json:"pid"`
+	Ready   bool   `json:"ready"` // 是否启动完毕
 }
 
 // ServerManager 服务器管理器
@@ -272,13 +272,12 @@ func (a *App) StartServer(name string) error {
 
 	// 构建 CmdLine
 	var cmdLineParts []string
-	cmdLineParts = append(cmdLineParts, "\""+javaPath+"\"")
+	cmdLineParts = append(cmdLineParts, quoteWindowsArg(javaPath))
 	for _, arg := range args {
-		if strings.Contains(arg, " ") {
-			cmdLineParts = append(cmdLineParts, "\""+arg+"\"")
-		} else {
-			cmdLineParts = append(cmdLineParts, arg)
+		if err := validateJavaArg(arg); err != nil {
+			return fmt.Errorf("非法的服务器启动参数 %q: %v", arg, err)
 		}
+		cmdLineParts = append(cmdLineParts, quoteWindowsArg(arg))
 	}
 	fullCmdLine := strings.Join(cmdLineParts, " ")
 

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 )
 
 func (a *App) GetModTranslationFileContent() (string, error) {
@@ -13,10 +12,3 @@ func (a *App) GetModTranslationFileContent() (string, error) {
 }
 
 // ReadLicenseFile 读取 Apache License 文件内容
-func (a *App) ReadLicenseFile() string {
-	data, err := os.ReadFile("resources/APACHE_LICENSE.txt")
-	if err != nil {
-		return ""
-	}
-	return string(data)
-}
